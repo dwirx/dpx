@@ -163,9 +163,17 @@ func runKeygen(svc app.Service, cfg config.Config, args []string, opts runOption
 	fs.SetOutput(opts.stderr)
 	outPath := fs.String("out", cfg.KeyFile, "path to write private key")
 	regen := fs.Bool("regen", false, "regenerate key pair if key file already exists")
+	importFile := fs.String("import-file", "", "import identity from an existing age key file")
+	importStdin := fs.Bool("import-stdin", false, "import identity from stdin (paste key block then EOF)")
 	noConfigUpdate := fs.Bool("no-config-update", false, "skip updating .dpx.yaml with generated public key")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *importFile != "" && *importStdin {
+		return fmt.Errorf("use only one import source: --import-file or --import-stdin")
+	}
+	if (*importFile != "" || *importStdin) && *regen {
+		return fmt.Errorf("--regen cannot be combined with import flags")
 	}
 
 	keyPath := expandHome(*outPath)
@@ -174,7 +182,28 @@ func runKeygen(svc app.Service, cfg config.Config, args []string, opts runOption
 		err      error
 		status   string
 	)
-	if _, statErr := os.Stat(keyPath); statErr == nil {
+	if *importFile != "" || *importStdin {
+		var raw []byte
+		if *importFile != "" {
+			raw, err = os.ReadFile(expandHome(*importFile))
+			if err != nil {
+				return err
+			}
+		} else {
+			raw, err = io.ReadAll(opts.stdin)
+			if err != nil {
+				return err
+			}
+		}
+		if strings.TrimSpace(string(raw)) == "" {
+			return fmt.Errorf("no key data provided for import")
+		}
+		identity, err = svc.ImportIdentity(keyPath, string(raw))
+		if err != nil {
+			return err
+		}
+		status = "imported"
+	} else if _, statErr := os.Stat(keyPath); statErr == nil {
 		if *regen {
 			identity, err = svc.Keygen(keyPath)
 			status = "regenerated"

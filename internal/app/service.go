@@ -54,8 +54,26 @@ func (s Service) Keygen(path string) (agex.Identity, error) {
 	if err != nil {
 		return agex.Identity{}, err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := writeIdentityFile(path, identity); err != nil {
 		return agex.Identity{}, err
+	}
+	return identity, nil
+}
+
+func (s Service) ImportIdentity(path, raw string) (agex.Identity, error) {
+	identity, err := agex.IdentityFromPrivateData(raw)
+	if err != nil {
+		return agex.Identity{}, err
+	}
+	if err := writeIdentityFile(path, identity); err != nil {
+		return agex.Identity{}, err
+	}
+	return identity, nil
+}
+
+func writeIdentityFile(path string, identity agex.Identity) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
 	}
 	keyData := strings.Join([]string{
 		"# created: " + time.Now().UTC().Format(time.RFC3339),
@@ -64,9 +82,9 @@ func (s Service) Keygen(path string) (agex.Identity, error) {
 		"",
 	}, "\n")
 	if err := os.WriteFile(path, []byte(keyData), 0o600); err != nil {
-		return agex.Identity{}, err
+		return err
 	}
-	return identity, nil
+	return nil
 }
 
 func (s Service) ReadIdentity(path string) (agex.Identity, error) {

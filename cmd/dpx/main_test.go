@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/dwirx/dpx/internal/config"
+	"github.com/dwirx/dpx/internal/crypto/agex"
 )
 
 func TestRunInitCreatesConfig(t *testing.T) {
@@ -325,6 +326,95 @@ func TestRunKeygenRegeneratesWhenRequested(t *testing.T) {
 	}
 	if len(cfg.Age.Recipients) < 2 {
 		t.Fatalf("expected old and new recipients to be tracked, got %#v", cfg.Age.Recipients)
+	}
+}
+
+func TestRunKeygenImportsFromFile(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	identity, err := agex.GenerateIdentity()
+	if err != nil {
+		t.Fatalf("generate identity: %v", err)
+	}
+	importRaw := strings.Join([]string{
+		"# created: 2026-03-17T11:47:02Z",
+		"# public key: " + identity.PublicKey,
+		identity.PrivateKey,
+		"",
+	}, "\n")
+
+	importPath := filepath.Join(dir, "source-age-keys.txt")
+	if err := os.WriteFile(importPath, []byte(importRaw), 0o600); err != nil {
+		t.Fatalf("write import file: %v", err)
+	}
+
+	outPath := filepath.Join(dir, "age-keys.txt")
+	stdout := new(bytes.Buffer)
+	if err := run([]string{"keygen", "--out", outPath, "--import-file", importPath}, runOptions{
+		cwd:    dir,
+		stdin:  strings.NewReader(""),
+		stdout: stdout,
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("run keygen import-file: %v", err)
+	}
+
+	data, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("read out key file: %v", err)
+	}
+	if !strings.Contains(string(data), identity.PrivateKey) || !strings.Contains(string(data), identity.PublicKey) {
+		t.Fatalf("expected imported identity in output key file, got %q", string(data))
+	}
+	if !strings.Contains(stdout.String(), "imported") {
+		t.Fatalf("expected imported status, got %q", stdout.String())
+	}
+
+	cfg, err := config.Load(filepath.Join(dir, ".dpx.yaml"))
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if !containsString(cfg.Age.Recipients, identity.PublicKey) {
+		t.Fatalf("expected imported public key in recipients, got %#v", cfg.Age.Recipients)
+	}
+}
+
+func TestRunKeygenImportsFromStdin(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	identity, err := agex.GenerateIdentity()
+	if err != nil {
+		t.Fatalf("generate identity: %v", err)
+	}
+	importRaw := strings.Join([]string{
+		"# created: 2026-03-17T11:47:02Z",
+		"# public key: " + identity.PublicKey,
+		identity.PrivateKey,
+		"",
+	}, "\n")
+
+	outPath := filepath.Join(dir, "age-keys.txt")
+	stdout := new(bytes.Buffer)
+	if err := run([]string{"keygen", "--out", outPath, "--import-stdin"}, runOptions{
+		cwd:    dir,
+		stdin:  strings.NewReader(importRaw),
+		stdout: stdout,
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("run keygen import-stdin: %v", err)
+	}
+
+	data, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("read out key file: %v", err)
+	}
+	if !strings.Contains(string(data), identity.PrivateKey) || !strings.Contains(string(data), identity.PublicKey) {
+		t.Fatalf("expected imported identity in output key file, got %q", string(data))
+	}
+	if !strings.Contains(stdout.String(), "imported") {
+		t.Fatalf("expected imported status, got %q", stdout.String())
 	}
 }
 
