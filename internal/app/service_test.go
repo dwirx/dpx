@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"dopx/internal/app"
-	"dopx/internal/config"
-	"dopx/internal/envelope"
+	"github.com/dwirx/dpx/internal/app"
+	"github.com/dwirx/dpx/internal/config"
+	"github.com/dwirx/dpx/internal/envelope"
 )
 
 func TestInitCreatesDefaultConfig(t *testing.T) {

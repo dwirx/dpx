@@ -12,11 +12,11 @@ import (
 
 	"golang.org/x/term"
 
-	"dopx/internal/app"
-	"dopx/internal/config"
-	"dopx/internal/discovery"
-	"dopx/internal/envelope"
-	"dopx/internal/tui"
+	"github.com/dwirx/dpx/internal/app"
+	"github.com/dwirx/dpx/internal/config"
+	"github.com/dwirx/dpx/internal/discovery"
+	"github.com/dwirx/dpx/internal/envelope"
+	"github.com/dwirx/dpx/internal/tui"
 )
 
 var version = "dev"

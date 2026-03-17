@@ -6,10 +6,10 @@ import (
 	"io"
 	"strings"
 
-	"dopx/internal/app"
-	"dopx/internal/config"
-	"dopx/internal/discovery"
-	"dopx/internal/envelope"
+	"github.com/dwirx/dpx/internal/app"
+	"github.com/dwirx/dpx/internal/config"
+	"github.com/dwirx/dpx/internal/discovery"
+	"github.com/dwirx/dpx/internal/envelope"
 )
 
 func RunFallback(svc app.Service, cfg config.Config, cwd string, stdin io.Reader, stdout io.Writer) error {

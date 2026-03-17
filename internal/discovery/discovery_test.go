@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"dopx/internal/discovery"
+	"github.com/dwirx/dpx/internal/discovery"
 )
 
 func TestFindCandidatesRanksExpectedEnvFiles(t *testing.T) {

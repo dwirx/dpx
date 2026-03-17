@@ -9,11 +9,11 @@ import (
 	"strings"
 	"time"
 
-	"dopx/internal/config"
-	"dopx/internal/crypto/agex"
-	"dopx/internal/crypto/password"
-	"dopx/internal/discovery"
-	"dopx/internal/envelope"
+	"github.com/dwirx/dpx/internal/config"
+	"github.com/dwirx/dpx/internal/crypto/agex"
+	"github.com/dwirx/dpx/internal/crypto/password"
+	"github.com/dwirx/dpx/internal/discovery"
+	"github.com/dwirx/dpx/internal/envelope"
 )
 
 type Service struct {

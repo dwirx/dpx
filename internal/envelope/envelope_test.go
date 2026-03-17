@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"dopx/internal/envelope"
+	"github.com/dwirx/dpx/internal/envelope"
 )
 
 func TestMarshalUnmarshalRoundTrip(t *testing.T) {

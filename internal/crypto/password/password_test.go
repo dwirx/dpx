@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	"dopx/internal/crypto/password"
+	"github.com/dwirx/dpx/internal/crypto/password"
 )
 
 func TestEncryptDecryptRoundTrip(t *testing.T) {

@@ -1,0 +1,52 @@
+name: ci
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Build binary
+        run: go build -trimpath -ldflags "-s -w -X main.version=ci" -o dpx ./cmd/dpx
+
+  package:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build release assets
+        run: VERSION=ci DIST_DIR=dist ./scripts/release.sh
+
+      - name: Smoke test install.sh
+        run: |
+          python3 -m http.server 18080 --directory dist >/tmp/dpx-http.log 2>&1 &
+          server_pid=$!
+          trap 'kill $server_pid' EXIT
+          sleep 1
+          DPX_INSTALL_BASE_URL=http://127.0.0.1:18080 DPX_INSTALL_DIR="$RUNNER_TEMP/bin" ./scripts/install.sh
+          "$RUNNER_TEMP/bin/dpx" --version

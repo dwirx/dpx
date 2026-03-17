@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"dopx/internal/config"
+	"github.com/dwirx/dpx/internal/config"
 )
 
 func TestCreateDefault(t *testing.T) {

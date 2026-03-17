@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	"dopx/internal/crypto/agex"
+	"github.com/dwirx/dpx/internal/crypto/agex"
 )
 
 func TestEncryptDecryptRoundTrip(t *testing.T) {

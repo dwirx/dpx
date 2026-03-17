@@ -13,10 +13,10 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"golang.org/x/term"
 
-	"dopx/internal/app"
-	"dopx/internal/config"
-	"dopx/internal/discovery"
-	"dopx/internal/envelope"
+	"github.com/dwirx/dpx/internal/app"
+	"github.com/dwirx/dpx/internal/config"
+	"github.com/dwirx/dpx/internal/discovery"
+	"github.com/dwirx/dpx/internal/envelope"
 )
 
 type stage int

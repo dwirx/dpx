@@ -1,66 +1,86 @@
 # DPX
 
-`dpx` is a Go CLI and TUI tool for encrypting `.env` and other local secret files into `.dpx` envelopes.
+`dpx` is a Go CLI and TUI tool for encrypting `.env` and similar local secret files into `.dpx` envelopes.
 
-It is designed for two practical workflows:
-- password-based encryption for quick local or one-to-one sharing
-- `age`-based encryption for repeatable team and key-based workflows
-
-## Why DPX
-
-DPX focuses on a narrow use case and keeps the workflow simple:
-- encrypt `.env` and similar files into `.dpx`
-- decrypt back to the original filename by default
-- use a guided TUI when you do not want to remember flags
-- inspect metadata safely without exposing plaintext
-- check project readiness with `dpx doctor`
-
-## Security Model
-
-DPX supports two encryption modes:
-
-### Password mode
-- KDF: `Argon2id`
-- Cipher: `XChaCha20-Poly1305`
-- Use this when you want a strong password-based workflow
-
-### Key mode
-- Backend: `age`
-- Use this when you want public-key encryption and shared team workflows
-
-### Metadata protection
-- outer `.dpx` metadata is validated against protected inner metadata
-- tampering with the stored filename, mode, or other protected fields causes decryption to fail
+It supports two practical encryption modes:
+- `age` for public-key workflows and team sharing
+- `Argon2id + XChaCha20-Poly1305` for password-based encryption
 
 ## Features
 
-- CLI and TUI interfaces
-- `init`, `keygen`, `encrypt`, `decrypt`, `inspect`, `doctor`, `tui`, `version`
-- smart file suggestions for `.env`, `.env.*`, `*.env`, `.secret*`, `.credentials*`
-- hidden password prompt on real terminals
-- `.dpx.yaml` as the primary config file
-- legacy compatibility for `.dopx.yaml`
-- legacy compatibility for older `DOPX-File-Version` envelopes
-- legacy key fallback from `~/.config/dopx/age-keys.txt`
+- Encrypt `.env` into `.env.dpx`
+- Decrypt back to the original filename by default
+- CLI and interactive TUI modes
+- Smart file suggestions for `.env`, `.env.*`, `*.env`, `.secret*`, `.credentials*`
+- `doctor` command to check config, key, and project readiness
+- Hidden password prompt on real terminals
+- Armored `.dpx` file format with metadata tamper detection
+- GitHub Actions CI and manual release workflow
+- Quick install scripts for Linux, macOS, and Windows
 
-## Install
+## Quick Install
 
-### Build locally
+Recommended install from GitHub Releases.
+
+### Linux and macOS
 
 ```bash
+curl -sSL https://github.com/dwirx/dpx/releases/latest/download/install.sh | bash
+```
+
+### Windows PowerShell
+
+```powershell
+irm https://github.com/dwirx/dpx/releases/latest/download/install.ps1 | iex
+```
+
+After install:
+
+```bash
+dpx --version
+```
+
+## Download Binary
+
+Download from GitHub Releases:
+
+| Platform | Architecture | Download |
+| --- | --- | --- |
+| Linux | x64 | `dpx_linux_amd64.tar.gz` |
+| Linux | ARM64 | `dpx_linux_arm64.tar.gz` |
+| macOS | Intel | `dpx_darwin_amd64.tar.gz` |
+| macOS | Apple Silicon | `dpx_darwin_arm64.tar.gz` |
+| Windows | x64 | `dpx_windows_amd64.zip` |
+| Windows | ARM64 | `dpx_windows_arm64.zip` |
+
+### Manual Install
+
+Linux and macOS:
+
+```bash
+tar -xzf dpx_*.tar.gz
+sudo mv dpx /usr/local/bin/
+dpx --version
+```
+
+Windows:
+- Extract the `.zip`
+- Move `dpx.exe` to a folder in your `PATH`
+- Run `dpx --version`
+
+## Install via Go
+
+```bash
+go install github.com/dwirx/dpx/cmd/dpx@latest
+```
+
+## Build From Source
+
+```bash
+git clone https://github.com/dwirx/dpx
+cd dpx
 go build -o dpx ./cmd/dpx
-```
-
-### Build with Make
-
-```bash
-make build
-```
-
-### Run tests
-
-```bash
-go test ./...
+sudo mv dpx /usr/local/bin/  # Linux/macOS
 ```
 
 ## Quick Start
@@ -68,10 +88,10 @@ go test ./...
 ### 1. Initialize a project
 
 ```bash
-./dpx init
+dpx init
 ```
 
-Example output:
+Expected output:
 
 ```text
 ✅ Created .dpx.yaml
@@ -82,10 +102,10 @@ Next steps:
   3. Run 'dpx encrypt <file>' to encrypt your secrets
 ```
 
-### 2. Generate an `age` key
+### 2. Generate an `age` key pair
 
 ```bash
-./dpx keygen
+dpx keygen
 ```
 
 Example output:
@@ -102,10 +122,10 @@ Example output:
 ╚══════════════════════════════════════════════════════════════════╝
 ```
 
-### 3. Encrypt a file with a password
+### 3. Encrypt with a password
 
 ```bash
-./dpx encrypt .env --password 'super-secret-password'
+dpx encrypt .env --password 'super-secret-password'
 ```
 
 Output:
@@ -114,10 +134,10 @@ Output:
 Encrypted .env -> .env.dpx
 ```
 
-### 4. Decrypt it back
+### 4. Decrypt back
 
 ```bash
-./dpx decrypt .env.dpx --password 'super-secret-password'
+dpx decrypt .env.dpx --password 'super-secret-password'
 ```
 
 Output:
@@ -129,90 +149,82 @@ Decrypted .env.dpx -> .env
 ### 5. Use the TUI
 
 ```bash
-./dpx tui
+dpx tui
 ```
 
 The TUI can:
-- suggest candidate secret files
-- let you choose password or `age`
+- choose `Encrypt`, `Decrypt`, or `Inspect`
+- suggest likely secret files
+- choose `Password` or `Age`
 - prompt for recipients or password
-- confirm output paths
-- inspect `.dpx` files
+- confirm output path
 
-## Common Workflows
+## Common Usage
 
 ### Encrypt with a password
 
-Interactive prompt:
+Prompt for password interactively:
 
 ```bash
-./dpx encrypt .env
+dpx encrypt .env
 ```
 
-Non-interactive:
+Pass the password explicitly:
 
 ```bash
-./dpx encrypt .env --password 'secret'
+dpx encrypt .env --password 'secret'
 ```
 
-Custom output path:
+Write to a custom output:
 
 ```bash
-./dpx encrypt .env --password 'secret' --out secrets/prod.env.dpx
+dpx encrypt .env --password 'secret' --out configs/prod.env.dpx
 ```
 
 ### Encrypt with `age`
 
-Using recipients from `.dpx.yaml`:
+Use recipients from `.dpx.yaml`:
 
 ```bash
-./dpx encrypt .env --age
+dpx encrypt .env --age
 ```
 
-Using explicit recipients:
+Pass recipients directly:
 
 ```bash
-./dpx encrypt .env --age --recipient age1abc...,age1def...
+dpx encrypt .env --age --recipient age1abc...,age1def...
 ```
 
-### Decrypt a password-protected file
+### Decrypt a file
 
-Prompt for password:
+Password mode with prompt:
 
 ```bash
-./dpx decrypt .env.dpx
+dpx decrypt .env.dpx
 ```
 
-Pass password explicitly:
+Password mode with explicit password:
 
 ```bash
-./dpx decrypt .env.dpx --password 'secret'
+dpx decrypt .env.dpx --password 'secret'
 ```
 
-Write to a different output path:
+`age` mode with explicit identity file:
 
 ```bash
-./dpx decrypt .env.dpx --password 'secret' --out .env.restored
+dpx decrypt .env.dpx --identity ~/.config/dpx/age-keys.txt
 ```
 
-### Decrypt an `age`-encrypted file
-
-Using the default key file:
+Restore to a different path:
 
 ```bash
-./dpx decrypt .env.dpx
-```
-
-Using a specific identity file:
-
-```bash
-./dpx decrypt .env.dpx --identity ~/.config/dpx/age-keys.txt
+dpx decrypt .env.dpx --out .env.restored
 ```
 
 ### Inspect metadata safely
 
 ```bash
-./dpx inspect .env.dpx
+dpx inspect .env.dpx
 ```
 
 Example output:
@@ -228,22 +240,22 @@ KDF: argon2id
 ### Check project readiness
 
 ```bash
-./dpx doctor
+dpx doctor
 ```
 
-What `doctor` checks:
-- whether `.dpx.yaml` exists
-- whether legacy `.dopx.yaml` is being used
+`doctor` reports:
+- which config file is in use
+- whether a legacy config is being used
 - whether the key file exists
-- recipient count from config
-- how many candidate secret files were found
-- how many `.dpx` files exist in the current directory
+- number of configured recipients
+- number of suggested files
+- number of `.dpx` files in the current directory
 
 ## CLI Reference
 
 ### `dpx init`
 
-Creates `.dpx.yaml` in the current directory.
+Create `.dpx.yaml` in the current directory.
 
 Behavior:
 - fails if `.dpx.yaml` already exists
@@ -251,93 +263,50 @@ Behavior:
 
 ### `dpx keygen [--out <path>]`
 
-Generates an `age` identity file.
+Generate an `age` identity file.
 
-Default output path:
+Default key path:
 
 ```text
 ~/.config/dpx/age-keys.txt
 ```
 
-Example:
-
-```bash
-./dpx keygen --out ~/.config/dpx/age-keys.txt
-```
-
 ### `dpx encrypt <file> [--password <text>] [--age] [--recipient <csv>] [--out <path>]`
 
-Encrypts a file into `.dpx`.
+Encrypt a file into `.dpx`.
 
-Notes:
-- if `--password` is provided, password mode is used
-- if `--age` is provided, `age` mode is used
-- if no file is provided, DPX tries to suggest one interactively
-- if no output path is provided, DPX writes `<file>.dpx`
-
-Examples:
-
-```bash
-./dpx encrypt .env --password 'secret'
-./dpx encrypt .env --age
-./dpx encrypt .env --age --recipient age1abc...,age1def...
-./dpx encrypt .env --password 'secret' --out releases/prod.env.dpx
-```
+Rules:
+- `--password` selects password mode
+- `--age` selects `age` mode
+- if no output is provided, output becomes `<file>.dpx`
+- if no file is provided in interactive mode, DPX suggests local candidates
 
 ### `dpx decrypt <file.dpx> [--password <text>] [--identity <path>] [--out <path>]`
 
-Decrypts a `.dpx` file.
+Decrypt a `.dpx` file.
 
-Notes:
-- DPX auto-detects whether the file uses password mode or `age`
-- if no output path is provided, DPX restores the original filename from metadata
-- if no password is provided for password mode, DPX prompts for it
-
-Examples:
-
-```bash
-./dpx decrypt .env.dpx
-./dpx decrypt .env.dpx --password 'secret'
-./dpx decrypt .env.dpx --identity ~/.config/dpx/age-keys.txt
-./dpx decrypt .env.dpx --out .env.restored
-```
+Rules:
+- DPX auto-detects password or `age` mode from metadata
+- if no output is provided, DPX restores the original filename from metadata
+- if password mode is detected and no password is provided, DPX prompts for it
 
 ### `dpx inspect <file.dpx>`
 
-Prints safe metadata only.
+Show safe metadata only.
 
 ### `dpx doctor`
 
-Prints local environment and project readiness information.
+Show project and local environment readiness.
 
 ### `dpx tui`
 
-Launches the interactive interface.
-
-Notes:
-- uses a full-screen TUI on real terminals
-- falls back to a guided line-based interface when stdin/stdout are not TTYs
+Launch the interactive interface.
 
 ### `dpx version`
 ### `dpx --version`
 ### `dpx -v`
 
 Print the current version.
-
-## TUI Behavior
-
-The TUI supports three actions:
-- Encrypt
-- Decrypt
-- Inspect
-
-In interactive terminals, DPX uses a full-screen Bubble Tea UI.
-
-When running through pipes or non-interactive environments, DPX uses a guided fallback UI that still supports:
-- file selection
-- mode selection
-- password input
-- output path selection
 
 ## Config File
 
@@ -347,13 +316,13 @@ Primary config file:
 .dpx.yaml
 ```
 
-Legacy config file still supported:
+Legacy config still supported:
 
 ```text
 .dopx.yaml
 ```
 
-Example config:
+Example:
 
 ```yaml
 version: 1
@@ -373,21 +342,21 @@ discovery:
 
 ## File Format
 
-DPX writes an armored text envelope with metadata and payload.
+DPX writes armored text envelopes.
 
-Current header key:
+Current header prefix:
 
 ```text
 DPX-File-Version: 1
 ```
 
-DPX can still read legacy envelopes that use:
+Legacy envelopes are still accepted:
 
 ```text
 DOPX-File-Version: 1
 ```
 
-Default encrypted filename:
+Default encrypted output:
 
 ```text
 .env.dpx
@@ -395,25 +364,65 @@ Default encrypted filename:
 
 ## Security Notes
 
-- password mode uses `Argon2id`
-- password encryption uses `XChaCha20-Poly1305`
-- key mode uses `filippo.io/age`
-- decrypted plaintext is restored exactly as bytes from the original file
-- password prompts are hidden on real terminals
-- `doctor` does not expose plaintext
-- config may contain public recipients, not private keys
-- the private key file should stay outside the repository
+- Password mode uses `Argon2id`
+- Password encryption uses `XChaCha20-Poly1305`
+- Key mode uses `filippo.io/age`
+- Outer `.dpx` metadata is checked against protected inner metadata
+- Tampered metadata causes decryption to fail
+- Decryption restores original bytes
+- Password prompts are hidden on real terminals
+- Keep private keys outside the repository
 
-## Migration Notes
+## GitHub Actions
 
-DPX is the new primary name.
+This repository includes:
+- CI workflow: `.github/workflows/ci.yml`
+- Manual release workflow: `.github/workflows/release.yml`
 
-Compatibility retained:
-- `.dpx.yaml` is preferred
-- `.dopx.yaml` is still read
-- `~/.config/dpx/age-keys.txt` is preferred
-- `~/.config/dopx/age-keys.txt` is still used as fallback
-- old envelopes using `DOPX-File-Version` still decrypt
+### CI workflow
+
+Runs on:
+- push to `main`
+- pull requests
+
+Checks:
+- `go test ./...`
+- binary build
+- release asset build
+- Linux installer smoke test against locally served release assets
+
+### Manual release workflow
+
+The release workflow is triggered manually from GitHub Actions with a version input.
+
+Example version input:
+
+```text
+v0.2.0
+```
+
+What the workflow does:
+- validates the version string
+- checks that the tag does not already exist
+- runs tests
+- builds release assets
+- smoke tests `install.sh`
+- creates and pushes the tag
+- publishes a GitHub Release
+
+## Release Assets
+
+The release workflow publishes stable asset names:
+
+- `dpx_linux_amd64.tar.gz`
+- `dpx_linux_arm64.tar.gz`
+- `dpx_darwin_amd64.tar.gz`
+- `dpx_darwin_arm64.tar.gz`
+- `dpx_windows_amd64.zip`
+- `dpx_windows_arm64.zip`
+- `install.sh`
+- `install.ps1`
+- `checksums.txt`
 
 ## Development
 
@@ -423,13 +432,13 @@ Run tests:
 make test
 ```
 
-Build local binary:
+Build:
 
 ```bash
 make build VERSION=dev
 ```
 
-Build release archives:
+Build local release assets:
 
 ```bash
 make release VERSION=v0.2.0
@@ -437,36 +446,46 @@ make release VERSION=v0.2.0
 
 Artifacts are written to `dist/`.
 
+## Migration From `dopx`
+
+DPX is the new primary name.
+
+Compatibility retained:
+- `.dpx.yaml` is preferred
+- `.dopx.yaml` is still read
+- `~/.config/dpx/age-keys.txt` is preferred
+- `~/.config/dopx/age-keys.txt` is still used as fallback
+- envelopes using `DOPX-File-Version` still decrypt
+
 ## Troubleshooting
 
 ### `config already exists`
 
-You already have `.dpx.yaml` or legacy `.dopx.yaml` in the directory.
+You already have `.dpx.yaml` or `.dopx.yaml` in the working directory.
 
 ### `no candidate files found`
 
 DPX did not find a file matching its discovery patterns in the current directory.
 
-### `password metadata missing` or decryption failed
+### Password decryption fails
 
 Possible causes:
 - wrong password
-- tampered `.dpx` file
+- tampered file
 - corrupted payload
 
-### `age` decrypt fails
+### `age` decryption fails
 
 Possible causes:
 - wrong identity file
-- the file was encrypted for a different recipient
-- the required private key file does not exist locally
+- wrong recipient
+- missing private key file
 
 ## Repository Hygiene
 
 Do not commit:
-- plaintext `.env` secrets
+- plaintext `.env` files with real secrets
 - generated `.dpx` secret files
-- local private keys
-- build outputs
-
-Use a `.gitignore` for local artifacts and secrets.
+- private keys
+- local binaries
+- local `dist/` artifacts
