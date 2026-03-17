@@ -6,6 +6,8 @@ It supports two practical encryption modes:
 - `age` for public-key workflows and team sharing
 - `Argon2id + XChaCha20-Poly1305` for password-based encryption
 
+Latest changes are tracked in [`CHANGELOG.md`](./CHANGELOG.md).
+
 ## ✨ Features
 
 - Encrypt `.env` into `.env.dpx`
