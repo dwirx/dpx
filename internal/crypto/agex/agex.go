@@ -24,6 +24,24 @@ func GenerateIdentity() (Identity, error) {
 	}, nil
 }
 
+func IdentityFromPrivateData(data string) (Identity, error) {
+	identities, err := age.ParseIdentities(strings.NewReader(data))
+	if err != nil {
+		return Identity{}, fmt.Errorf("parse identities: %w", err)
+	}
+	for _, parsed := range identities {
+		x25519, ok := parsed.(*age.X25519Identity)
+		if !ok {
+			continue
+		}
+		return Identity{
+			PublicKey:  x25519.Recipient().String(),
+			PrivateKey: x25519.String(),
+		}, nil
+	}
+	return Identity{}, fmt.Errorf("no x25519 private key found")
+}
+
 func Encrypt(plaintext []byte, recipients []string) ([]byte, error) {
 	if len(recipients) == 0 {
 		return nil, fmt.Errorf("at least one recipient is required")

@@ -230,6 +230,104 @@ age:
 	}
 }
 
+func TestRunKeygenUsesExistingKeyByDefault(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "age-keys.txt")
+
+	if err := run([]string{"keygen", "--out", keyPath}, runOptions{
+		cwd:    dir,
+		stdin:  strings.NewReader(""),
+		stdout: new(bytes.Buffer),
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("initial keygen: %v", err)
+	}
+	before, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatalf("read initial key file: %v", err)
+	}
+
+	stdout := new(bytes.Buffer)
+	if err := run([]string{"keygen", "--out", keyPath}, runOptions{
+		cwd:    dir,
+		stdin:  strings.NewReader(""),
+		stdout: stdout,
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("second keygen: %v", err)
+	}
+	after, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatalf("read second key file: %v", err)
+	}
+
+	if !bytes.Equal(before, after) {
+		t.Fatalf("expected existing key to be reused")
+	}
+	if !strings.Contains(stdout.String(), "using existing") {
+		t.Fatalf("expected status to mention existing key, got %q", stdout.String())
+	}
+
+	cfg, err := config.Load(filepath.Join(dir, ".dpx.yaml"))
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if len(cfg.Age.Recipients) != 1 {
+		t.Fatalf("expected single recipient after reusing key, got %#v", cfg.Age.Recipients)
+	}
+}
+
+func TestRunKeygenRegeneratesWhenRequested(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "age-keys.txt")
+
+	if err := run([]string{"keygen", "--out", keyPath}, runOptions{
+		cwd:    dir,
+		stdin:  strings.NewReader(""),
+		stdout: new(bytes.Buffer),
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("initial keygen: %v", err)
+	}
+	before, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatalf("read initial key file: %v", err)
+	}
+
+	stdout := new(bytes.Buffer)
+	if err := run([]string{"keygen", "--out", keyPath, "--regen"}, runOptions{
+		cwd:    dir,
+		stdin:  strings.NewReader(""),
+		stdout: stdout,
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("regen keygen: %v", err)
+	}
+	after, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatalf("read regenerated key file: %v", err)
+	}
+
+	if bytes.Equal(before, after) {
+		t.Fatalf("expected key file to change after --regen")
+	}
+	if !strings.Contains(stdout.String(), "regenerated") {
+		t.Fatalf("expected status to mention regenerated key, got %q", stdout.String())
+	}
+
+	cfg, err := config.Load(filepath.Join(dir, ".dpx.yaml"))
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if len(cfg.Age.Recipients) < 2 {
+		t.Fatalf("expected old and new recipients to be tracked, got %#v", cfg.Age.Recipients)
+	}
+}
+
 func TestRunPasswordEncryptDecryptCommands(t *testing.T) {
 	t.Parallel()
 
@@ -250,6 +348,47 @@ func TestRunPasswordEncryptDecryptCommands(t *testing.T) {
 	encryptedPath := sourcePath + ".dpx"
 	if err := run([]string{"decrypt", encryptedPath, "--password", "secret-123"}, runOptions{cwd: dir, stdout: new(bytes.Buffer), stderr: new(bytes.Buffer), stdin: strings.NewReader("")}); err != nil {
 		t.Fatalf("run decrypt: %v", err)
+	}
+
+	restored, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Fatalf("read restored: %v", err)
+	}
+	if !bytes.Equal(restored, plaintext) {
+		t.Fatalf("restored mismatch: got %q want %q", restored, plaintext)
+	}
+}
+
+func TestRunEncDecAliases(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, ".env")
+	plaintext := []byte("FOO=bar\nHELLO=world\n")
+	if err := os.WriteFile(sourcePath, plaintext, 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	if err := run([]string{"enc", sourcePath, "--password", "secret-123"}, runOptions{
+		cwd:    dir,
+		stdin:  strings.NewReader(""),
+		stdout: new(bytes.Buffer),
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("run enc alias: %v", err)
+	}
+	if err := os.Remove(sourcePath); err != nil {
+		t.Fatalf("remove source: %v", err)
+	}
+
+	encryptedPath := sourcePath + ".dpx"
+	if err := run([]string{"dec", encryptedPath, "--password", "secret-123"}, runOptions{
+		cwd:    dir,
+		stdin:  strings.NewReader(""),
+		stdout: new(bytes.Buffer),
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("run dec alias: %v", err)
 	}
 
 	restored, err := os.ReadFile(sourcePath)

@@ -28,6 +28,34 @@ func TestInitCreatesDefaultConfig(t *testing.T) {
 	}
 }
 
+func TestKeygenStoresPrivateAndPublicInKeyFile(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "age-keys.txt")
+	svc := app.New(config.Default())
+
+	identity, err := svc.Keygen(keyPath)
+	if err != nil {
+		t.Fatalf("keygen: %v", err)
+	}
+
+	data, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatalf("read key file: %v", err)
+	}
+	text := string(data)
+	if !strings.Contains(text, identity.PrivateKey) {
+		t.Fatalf("expected private key in key file")
+	}
+	if !strings.Contains(text, identity.PublicKey) {
+		t.Fatalf("expected public key in key file")
+	}
+	if !strings.Contains(text, "# public key: "+identity.PublicKey) {
+		t.Fatalf("expected public key comment format, got %q", text)
+	}
+}
+
 func TestPasswordEncryptInspectDecryptRoundTrip(t *testing.T) {
 	t.Parallel()
 

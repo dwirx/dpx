@@ -57,10 +57,24 @@ func (s Service) Keygen(path string) (agex.Identity, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return agex.Identity{}, err
 	}
-	if err := os.WriteFile(path, []byte(identity.PrivateKey+"\n"), 0o600); err != nil {
+	keyData := strings.Join([]string{
+		"# created: " + time.Now().UTC().Format(time.RFC3339),
+		"# public key: " + identity.PublicKey,
+		identity.PrivateKey,
+		"",
+	}, "\n")
+	if err := os.WriteFile(path, []byte(keyData), 0o600); err != nil {
 		return agex.Identity{}, err
 	}
 	return identity, nil
+}
+
+func (s Service) ReadIdentity(path string) (agex.Identity, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return agex.Identity{}, err
+	}
+	return agex.IdentityFromPrivateData(string(data))
 }
 
 func (s Service) Discover(root string) ([]discovery.Candidate, error) {

@@ -14,6 +14,7 @@ import (
 
 	"github.com/dwirx/dpx/internal/app"
 	"github.com/dwirx/dpx/internal/config"
+	"github.com/dwirx/dpx/internal/crypto/agex"
 	"github.com/dwirx/dpx/internal/discovery"
 	"github.com/dwirx/dpx/internal/envelope"
 	"github.com/dwirx/dpx/internal/tui"
@@ -110,9 +111,9 @@ func run(args []string, opts runOptions) error {
 	switch args[0] {
 	case "keygen":
 		return runKeygen(svc, cfg, args[1:], opts)
-	case "encrypt":
+	case "encrypt", "enc":
 		return runEncrypt(svc, cfg, args[1:], opts)
-	case "decrypt":
+	case "decrypt", "dec":
 		return runDecrypt(svc, args[1:], opts)
 	case "inspect":
 		return runInspect(svc, args[1:], opts)
@@ -161,15 +162,40 @@ func runKeygen(svc app.Service, cfg config.Config, args []string, opts runOption
 	fs := flag.NewFlagSet("keygen", flag.ContinueOnError)
 	fs.SetOutput(opts.stderr)
 	outPath := fs.String("out", cfg.KeyFile, "path to write private key")
+	regen := fs.Bool("regen", false, "regenerate key pair if key file already exists")
 	noConfigUpdate := fs.Bool("no-config-update", false, "skip updating .dpx.yaml with generated public key")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
 	keyPath := expandHome(*outPath)
-	identity, err := svc.Keygen(keyPath)
-	if err != nil {
-		return err
+	var (
+		identity agex.Identity
+		err      error
+		status   string
+	)
+	if _, statErr := os.Stat(keyPath); statErr == nil {
+		if *regen {
+			identity, err = svc.Keygen(keyPath)
+			status = "regenerated"
+		} else {
+			identity, err = svc.ReadIdentity(keyPath)
+			status = "using existing"
+		}
+		if err != nil {
+			if *regen {
+				return err
+			}
+			return fmt.Errorf("read existing key file %s: %w (use --regen to replace)", keyPath, err)
+		}
+	} else if errors.Is(statErr, os.ErrNotExist) {
+		identity, err = svc.Keygen(keyPath)
+		if err != nil {
+			return err
+		}
+		status = "generated"
+	} else if statErr != nil {
+		return statErr
 	}
 
 	var syncResult keygenConfigSyncResult
@@ -186,6 +212,7 @@ func runKeygen(svc app.Service, cfg config.Config, args []string, opts runOption
 		"╠══════════════════════════════════════════════════════════════════╣",
 		"║ Backend: age                                                     ║",
 		fmt.Sprintf("║ Key file: %-52s║", padRight(keyPath, 52)),
+		fmt.Sprintf("║ Status: %-54s║", padRight(status, 54)),
 		"╠══════════════════════════════════════════════════════════════════╣",
 		"║ Public Key:                                                       ║",
 		fmt.Sprintf("║   %-63s║", truncate(identity.PublicKey, 63)),
@@ -774,8 +801,8 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "Commands:")
 	fmt.Fprintln(w, "  init")
 	fmt.Fprintln(w, "  keygen")
-	fmt.Fprintln(w, "  encrypt")
-	fmt.Fprintln(w, "  decrypt")
+	fmt.Fprintln(w, "  encrypt (enc)")
+	fmt.Fprintln(w, "  decrypt (dec)")
 	fmt.Fprintln(w, "  inspect")
 	fmt.Fprintln(w, "  tui")
 	fmt.Fprintln(w, "  doctor")
