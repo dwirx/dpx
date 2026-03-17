@@ -36,6 +36,19 @@ const (
 	stageDecryptManualPath
 	stageDecryptPassword
 	stageDecryptOutput
+	stageEnvEncryptFile
+	stageEnvEncryptManualPath
+	stageEnvEncryptMode
+	stageEnvEncryptKeys
+	stageEnvEncryptPassword
+	stageEnvEncryptPasswordConfirm
+	stageEnvEncryptRecipients
+	stageEnvEncryptOutput
+	stageEnvDecryptFile
+	stageEnvDecryptManualPath
+	stageEnvDecryptPassword
+	stageEnvDecryptPasswordConfirm
+	stageEnvDecryptOutput
 	stageInspectFile
 	stageInspectManualPath
 	stageImportSource
@@ -56,21 +69,26 @@ const (
 )
 
 type navSnapshot struct {
-	stage        stage
-	title        string
-	help         string
-	options      []string
-	selection    int
-	input        textinput.Model
-	encryptReq   app.EncryptRequest
-	passwordBuf  string
-	encryptScope encryptScope
-	encryptQuery string
-	encryptAll   []string
-	encryptShown []string
-	decryptReq   app.DecryptRequest
-	decryptMeta  envelope.Metadata
-	importRaw    string
+	stage         stage
+	title         string
+	help          string
+	options       []string
+	selection     int
+	input         textinput.Model
+	encryptReq    app.EncryptRequest
+	passwordBuf   string
+	encryptScope  encryptScope
+	encryptQuery  string
+	encryptAll    []string
+	encryptShown  []string
+	decryptReq    app.DecryptRequest
+	decryptMeta   envelope.Metadata
+	envEncryptReq app.EnvInlineEncryptRequest
+	envDecryptReq app.EnvInlineDecryptRequest
+	envKeys       []string
+	envHasAge     bool
+	envHasPwd     bool
+	importRaw     string
 }
 
 type Model struct {
@@ -90,16 +108,21 @@ type Model struct {
 	result    string
 	err       error
 
-	encryptReq   app.EncryptRequest
-	passwordBuf  string
-	encryptScope encryptScope
-	encryptQuery string
-	encryptAll   []string
-	encryptShown []string
-	decryptReq   app.DecryptRequest
-	decryptMeta  envelope.Metadata
-	importRaw    string
-	history      []navSnapshot
+	encryptReq    app.EncryptRequest
+	passwordBuf   string
+	encryptScope  encryptScope
+	encryptQuery  string
+	encryptAll    []string
+	encryptShown  []string
+	decryptReq    app.DecryptRequest
+	decryptMeta   envelope.Metadata
+	envEncryptReq app.EnvInlineEncryptRequest
+	envDecryptReq app.EnvInlineDecryptRequest
+	envKeys       []string
+	envHasAge     bool
+	envHasPwd     bool
+	importRaw     string
+	history       []navSnapshot
 }
 
 func Run(svc app.Service, cfg config.Config, cwd string, stdin io.Reader, stdout io.Writer) error {
@@ -128,7 +151,7 @@ func NewModel(svc app.Service, cfg config.Config, cwd string, stdin io.Reader, s
 		}
 	}
 	m := Model{svc: svc, cfg: cfg, cwd: cwd, stdin: stdin, stdout: stdout, interactive: interactive}
-	m.applyMenu(stageAction, "Choose an action", []string{"Encrypt", "Decrypt", "Inspect", "Auto", "Import Key", "Doctor"})
+	m.applyMenu(stageAction, "Choose an action", []string{"Encrypt", "Decrypt", "Inspect", "Auto", "Import Key", "Doctor", "Env Inline Encrypt", "Env Inline Decrypt"})
 	return m, nil
 }
 
@@ -217,6 +240,16 @@ func (m Model) isInputStage() bool {
 		stageDecryptManualPath,
 		stageDecryptPassword,
 		stageDecryptOutput,
+		stageEnvEncryptManualPath,
+		stageEnvEncryptKeys,
+		stageEnvEncryptPassword,
+		stageEnvEncryptPasswordConfirm,
+		stageEnvEncryptRecipients,
+		stageEnvEncryptOutput,
+		stageEnvDecryptManualPath,
+		stageEnvDecryptPassword,
+		stageEnvDecryptPasswordConfirm,
+		stageEnvDecryptOutput,
 		stageInspectManualPath,
 		stageImportFilePath,
 		stageImportRaw,
@@ -316,6 +349,24 @@ func (m Model) submitSelection() (tea.Model, tea.Cmd) {
 		case "Auto":
 			m.setInput(stageAutoPath, "File path (any file or .dpx)", "", false)
 			return m, nil
+		case "Env Inline Encrypt":
+			candidates, err := m.svc.Discover(m.cwd)
+			if err != nil {
+				return m.fail(err)
+			}
+			options := candidateLabels(candidates)
+			options = append(options, manualEncryptPathOption)
+			m.setMenu(stageEnvEncryptFile, "Select a .env file for inline encryption", options)
+		case "Env Inline Decrypt":
+			files, err := findEncryptedFiles(m.cwd)
+			if err != nil {
+				return m.fail(err)
+			}
+			if len(files) == 0 {
+				m.setInput(stageEnvDecryptManualPath, "Env .dpx file path", "", false)
+				return m, nil
+			}
+			m.setMenu(stageEnvDecryptFile, "Select a .env.dpx file to decrypt", files)
 		case "Import Key":
 			m.setMenu(stageImportSource, "Import source", []string{"From file", "Paste private key"})
 		case "Doctor":
@@ -370,6 +421,30 @@ func (m Model) submitSelection() (tea.Model, tea.Cmd) {
 		}
 	case stageDecryptFile:
 		return m.startDecrypt(selected)
+	case stageEnvEncryptFile:
+		if selected == manualEncryptPathOption {
+			m.setInput(stageEnvEncryptManualPath, "Env file path", "", false)
+			return m, nil
+		}
+		m.envEncryptReq = app.EnvInlineEncryptRequest{InputPath: selected}
+		m.setMenu(stageEnvEncryptMode, "Choose inline env encryption mode", []string{"Age", "Password"})
+	case stageEnvEncryptMode:
+		if selected == "Age" {
+			m.envEncryptReq.Mode = envelope.ModeAge
+			m.envEncryptReq.Recipients = append([]string{}, m.cfg.Age.Recipients...)
+		} else {
+			m.envEncryptReq.Mode = envelope.ModePassword
+			m.envEncryptReq.Recipients = nil
+		}
+		keys, err := m.svc.ListEnvInlineKeys(m.envEncryptReq.InputPath)
+		if err != nil {
+			return m.fail(err)
+		}
+		m.envKeys = keys
+		hint := "Keys (comma-separated names or 'all')"
+		m.setInput(stageEnvEncryptKeys, hint, "all", false)
+	case stageEnvDecryptFile:
+		return m.startEnvInlineDecrypt(selected)
 	case stageInspectFile:
 		return m.showInspectResult(selected)
 	case stageImportSource:
@@ -483,6 +558,112 @@ func (m Model) submitInput() (tea.Model, tea.Cmd) {
 		if !m.interactive {
 			return m, tea.Quit
 		}
+	case stageEnvEncryptManualPath:
+		if value == "" {
+			m.help = "File path is required, q quits"
+			return m, nil
+		}
+		m.envEncryptReq = app.EnvInlineEncryptRequest{InputPath: value}
+		m.setMenu(stageEnvEncryptMode, "Choose inline env encryption mode", []string{"Age", "Password"})
+	case stageEnvEncryptKeys:
+		selectedKeys, err := parseEnvKeysInput(value, m.envKeys)
+		if err != nil {
+			m.help = err.Error()
+			return m, nil
+		}
+		m.envEncryptReq.SelectedKeys = selectedKeys
+		if m.envEncryptReq.Mode == envelope.ModePassword {
+			m.setInput(stageEnvEncryptPassword, "Password", "", true)
+			return m, nil
+		}
+		if len(m.envEncryptReq.Recipients) == 0 {
+			m.setInput(stageEnvEncryptRecipients, "Recipients (comma-separated)", "", false)
+			return m, nil
+		}
+		m.setInput(stageEnvEncryptOutput, "Output path", m.envEncryptReq.InputPath+m.cfg.DefaultSuffix, false)
+	case stageEnvEncryptPassword:
+		if value == "" {
+			m.help = "Password is required, q quits"
+			return m, nil
+		}
+		m.passwordBuf = value
+		m.setInput(stageEnvEncryptPasswordConfirm, "Confirm password", "", true)
+	case stageEnvEncryptPasswordConfirm:
+		if value == "" {
+			m.help = "Confirm password is required, q quits"
+			return m, nil
+		}
+		if value != m.passwordBuf {
+			m.passwordBuf = ""
+			m.envEncryptReq.Passphrase = nil
+			m.applyInput(stageEnvEncryptPassword, "Password", "", true)
+			m.help = "Password confirmation mismatch. Re-enter password, q quits"
+			return m, nil
+		}
+		m.envEncryptReq.Passphrase = []byte(value)
+		m.passwordBuf = ""
+		m.setInput(stageEnvEncryptOutput, "Output path", m.envEncryptReq.InputPath+m.cfg.DefaultSuffix, false)
+	case stageEnvEncryptRecipients:
+		m.envEncryptReq.Recipients = splitCSV(value)
+		m.setInput(stageEnvEncryptOutput, "Output path", m.envEncryptReq.InputPath+m.cfg.DefaultSuffix, false)
+	case stageEnvEncryptOutput:
+		m.envEncryptReq.OutputPath = value
+		result, err := m.svc.EncryptEnvInlineFile(m.envEncryptReq)
+		if err != nil {
+			return m.fail(err)
+		}
+		m.pushHistory()
+		m.err = nil
+		m.stage = stageResult
+		m.title = "Env Encrypt Result"
+		m.help = "Press Enter to exit, Esc back, q quits"
+		m.result = fmt.Sprintf("Env inline encrypted %s -> %s\nUpdated keys (%d): %s", m.envEncryptReq.InputPath, result.OutputPath, len(result.Updated), strings.Join(result.Updated, ", "))
+		if !m.interactive {
+			return m, tea.Quit
+		}
+	case stageEnvDecryptManualPath:
+		if value == "" {
+			m.help = "File path is required, q quits"
+			return m, nil
+		}
+		return m.startEnvInlineDecrypt(value)
+	case stageEnvDecryptPassword:
+		if value == "" {
+			m.help = "Password is required, q quits"
+			return m, nil
+		}
+		m.passwordBuf = value
+		m.setInput(stageEnvDecryptPasswordConfirm, "Confirm password", "", true)
+	case stageEnvDecryptPasswordConfirm:
+		if value == "" {
+			m.help = "Confirm password is required, q quits"
+			return m, nil
+		}
+		if value != m.passwordBuf {
+			m.passwordBuf = ""
+			m.envDecryptReq.Passphrase = nil
+			m.applyInput(stageEnvDecryptPassword, "Password", "", true)
+			m.help = "Password confirmation mismatch. Re-enter password, q quits"
+			return m, nil
+		}
+		m.envDecryptReq.Passphrase = []byte(value)
+		m.passwordBuf = ""
+		m.setInput(stageEnvDecryptOutput, "Output path (blank keeps default)", "", false)
+	case stageEnvDecryptOutput:
+		m.envDecryptReq.OutputPath = value
+		result, err := m.svc.DecryptEnvInlineFile(m.envDecryptReq)
+		if err != nil {
+			return m.fail(err)
+		}
+		m.pushHistory()
+		m.err = nil
+		m.stage = stageResult
+		m.title = "Env Decrypt Result"
+		m.help = "Press Enter to exit, Esc back, q quits"
+		m.result = fmt.Sprintf("Env inline decrypted %s -> %s\nUpdated keys (%d): %s", m.envDecryptReq.InputPath, result.OutputPath, len(result.Updated), strings.Join(result.Updated, ", "))
+		if !m.interactive {
+			return m, tea.Quit
+		}
 	case stageInspectManualPath:
 		if value == "" {
 			m.help = "File path is required, q quits"
@@ -536,6 +717,28 @@ func (m Model) startDecrypt(path string) (tea.Model, tea.Cmd) {
 		m.setInput(stageDecryptPassword, "Password", "", true)
 	} else {
 		m.setInput(stageDecryptOutput, "Output path (blank uses original name)", "", false)
+	}
+	return m, nil
+}
+
+func (m Model) startEnvInlineDecrypt(path string) (tea.Model, tea.Cmd) {
+	hasAge, hasPassword, err := m.svc.DetectEnvInlineModes(path)
+	if err != nil {
+		return m.fail(err)
+	}
+	m.envHasAge = hasAge
+	m.envHasPwd = hasPassword
+	m.envDecryptReq = app.EnvInlineDecryptRequest{
+		InputPath:    path,
+		IdentityPath: m.cfg.KeyFile,
+	}
+	if !hasAge {
+		m.envDecryptReq.IdentityPath = ""
+	}
+	if hasPassword {
+		m.setInput(stageEnvDecryptPassword, "Password", "", true)
+	} else {
+		m.setInput(stageEnvDecryptOutput, "Output path (blank keeps default)", "", false)
 	}
 	return m, nil
 }
@@ -630,7 +833,7 @@ func (m *Model) togglePasswordVisibility() bool {
 
 func (m Model) isPasswordInputStage() bool {
 	switch m.stage {
-	case stageEncryptPassword, stageEncryptPasswordConfirm, stageDecryptPassword, stageImportRaw:
+	case stageEncryptPassword, stageEncryptPasswordConfirm, stageDecryptPassword, stageEnvEncryptPassword, stageEnvEncryptPasswordConfirm, stageEnvDecryptPassword, stageEnvDecryptPasswordConfirm, stageImportRaw:
 		return true
 	default:
 		return false
@@ -639,21 +842,26 @@ func (m Model) isPasswordInputStage() bool {
 
 func (m *Model) pushHistory() {
 	snapshot := navSnapshot{
-		stage:        m.stage,
-		title:        m.title,
-		help:         m.help,
-		options:      append([]string{}, m.options...),
-		selection:    m.selection,
-		input:        m.input,
-		encryptReq:   cloneEncryptRequest(m.encryptReq),
-		passwordBuf:  m.passwordBuf,
-		encryptScope: m.encryptScope,
-		encryptQuery: m.encryptQuery,
-		encryptAll:   append([]string{}, m.encryptAll...),
-		encryptShown: append([]string{}, m.encryptShown...),
-		decryptReq:   cloneDecryptRequest(m.decryptReq),
-		decryptMeta:  m.decryptMeta,
-		importRaw:    m.importRaw,
+		stage:         m.stage,
+		title:         m.title,
+		help:          m.help,
+		options:       append([]string{}, m.options...),
+		selection:     m.selection,
+		input:         m.input,
+		encryptReq:    cloneEncryptRequest(m.encryptReq),
+		passwordBuf:   m.passwordBuf,
+		encryptScope:  m.encryptScope,
+		encryptQuery:  m.encryptQuery,
+		encryptAll:    append([]string{}, m.encryptAll...),
+		encryptShown:  append([]string{}, m.encryptShown...),
+		decryptReq:    cloneDecryptRequest(m.decryptReq),
+		decryptMeta:   m.decryptMeta,
+		envEncryptReq: cloneEnvEncryptRequest(m.envEncryptReq),
+		envDecryptReq: cloneEnvDecryptRequest(m.envDecryptReq),
+		envKeys:       append([]string{}, m.envKeys...),
+		envHasAge:     m.envHasAge,
+		envHasPwd:     m.envHasPwd,
+		importRaw:     m.importRaw,
 	}
 	m.history = append(m.history, snapshot)
 }
@@ -678,6 +886,11 @@ func (m *Model) goBack() bool {
 	m.encryptShown = append([]string{}, last.encryptShown...)
 	m.decryptReq = cloneDecryptRequest(last.decryptReq)
 	m.decryptMeta = last.decryptMeta
+	m.envEncryptReq = cloneEnvEncryptRequest(last.envEncryptReq)
+	m.envDecryptReq = cloneEnvDecryptRequest(last.envDecryptReq)
+	m.envKeys = append([]string{}, last.envKeys...)
+	m.envHasAge = last.envHasAge
+	m.envHasPwd = last.envHasPwd
 	m.importRaw = last.importRaw
 	m.result = ""
 	m.err = nil
@@ -692,6 +905,20 @@ func cloneEncryptRequest(req app.EncryptRequest) app.EncryptRequest {
 }
 
 func cloneDecryptRequest(req app.DecryptRequest) app.DecryptRequest {
+	cloned := req
+	cloned.Passphrase = append([]byte(nil), req.Passphrase...)
+	return cloned
+}
+
+func cloneEnvEncryptRequest(req app.EnvInlineEncryptRequest) app.EnvInlineEncryptRequest {
+	cloned := req
+	cloned.Passphrase = append([]byte(nil), req.Passphrase...)
+	cloned.Recipients = append([]string{}, req.Recipients...)
+	cloned.SelectedKeys = append([]string{}, req.SelectedKeys...)
+	return cloned
+}
+
+func cloneEnvDecryptRequest(req app.EnvInlineDecryptRequest) app.EnvInlineDecryptRequest {
 	cloned := req
 	cloned.Passphrase = append([]byte(nil), req.Passphrase...)
 	return cloned
@@ -892,6 +1119,34 @@ func splitCSV(text string) []string {
 		}
 	}
 	return out
+}
+
+func parseEnvKeysInput(raw string, available []string) ([]string, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" || strings.EqualFold(value, "all") {
+		return append([]string{}, available...), nil
+	}
+	requested := splitCSV(value)
+	if len(requested) == 0 {
+		return nil, fmt.Errorf("no keys selected")
+	}
+	availableSet := make(map[string]struct{}, len(available))
+	for _, key := range available {
+		availableSet[key] = struct{}{}
+	}
+	selected := make([]string, 0, len(requested))
+	seen := make(map[string]struct{}, len(requested))
+	for _, key := range requested {
+		if _, ok := availableSet[key]; !ok {
+			return nil, fmt.Errorf("unknown env key %q", key)
+		}
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		selected = append(selected, key)
+	}
+	return selected, nil
 }
 
 func fileDescriptorInt(file *os.File) (int, bool) {

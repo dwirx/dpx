@@ -13,6 +13,7 @@ import (
 	"github.com/dwirx/dpx/internal/crypto/agex"
 	"github.com/dwirx/dpx/internal/crypto/password"
 	"github.com/dwirx/dpx/internal/discovery"
+	"github.com/dwirx/dpx/internal/envcrypt"
 	"github.com/dwirx/dpx/internal/envelope"
 	"github.com/dwirx/dpx/internal/safeio"
 )
@@ -35,6 +36,28 @@ type DecryptRequest struct {
 	Passphrase   []byte
 	IdentityPath string
 	PrivateKey   string
+}
+
+type EnvInlineEncryptRequest struct {
+	InputPath    string
+	OutputPath   string
+	Mode         string
+	Passphrase   []byte
+	Recipients   []string
+	SelectedKeys []string
+}
+
+type EnvInlineDecryptRequest struct {
+	InputPath    string
+	OutputPath   string
+	Passphrase   []byte
+	IdentityPath string
+	PrivateKey   string
+}
+
+type EnvInlineResult struct {
+	OutputPath string
+	Updated    []string
 }
 
 func New(cfg config.Config) Service {
@@ -102,6 +125,99 @@ func (s Service) Discover(root string) ([]discovery.Candidate, error) {
 
 func (s Service) DiscoverEncryptTargets(root string) ([]discovery.Candidate, error) {
 	return discovery.FindEncryptTargets(root)
+}
+
+func (s Service) ListEnvInlineKeys(path string) ([]string, error) {
+	data, err := safeio.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return envcrypt.ListEncryptableKeys(data), nil
+}
+
+func (s Service) DetectEnvInlineModes(path string) (bool, bool, error) {
+	data, err := safeio.ReadFile(path)
+	if err != nil {
+		return false, false, err
+	}
+	hasAge, hasPassword := envcrypt.DetectModes(data)
+	return hasAge, hasPassword, nil
+}
+
+func (s Service) EncryptEnvInlineFile(req EnvInlineEncryptRequest) (EnvInlineResult, error) {
+	if req.InputPath == "" {
+		return EnvInlineResult{}, fmt.Errorf("input path is required")
+	}
+	data, err := safeio.ReadFile(req.InputPath)
+	if err != nil {
+		return EnvInlineResult{}, err
+	}
+
+	encryptReq := envcrypt.EncryptRequest{
+		Mode:         req.Mode,
+		Passphrase:   req.Passphrase,
+		Recipients:   req.Recipients,
+		SelectedKeys: req.SelectedKeys,
+	}
+	if encryptReq.Mode == envelope.ModeAge && len(encryptReq.Recipients) == 0 {
+		encryptReq.Recipients = append([]string{}, s.cfg.Age.Recipients...)
+	}
+
+	encrypted, report, err := envcrypt.Encrypt(data, encryptReq)
+	if err != nil {
+		return EnvInlineResult{}, err
+	}
+
+	outputPath := req.OutputPath
+	if outputPath == "" {
+		outputPath = req.InputPath + s.cfg.DefaultSuffix
+	}
+	if err := writeFileSecure(outputPath, encrypted, 0o600); err != nil {
+		return EnvInlineResult{}, err
+	}
+	return EnvInlineResult{OutputPath: outputPath, Updated: report.UpdatedKeys}, nil
+}
+
+func (s Service) DecryptEnvInlineFile(req EnvInlineDecryptRequest) (EnvInlineResult, error) {
+	if req.InputPath == "" {
+		return EnvInlineResult{}, fmt.Errorf("input path is required")
+	}
+	data, err := safeio.ReadFile(req.InputPath)
+	if err != nil {
+		return EnvInlineResult{}, err
+	}
+	hasAge, hasPassword := envcrypt.DetectModes(data)
+
+	privateKey := strings.TrimSpace(req.PrivateKey)
+	if hasAge && privateKey == "" {
+		privateKey, err = s.resolvePrivateKey(DecryptRequest{
+			IdentityPath: req.IdentityPath,
+			PrivateKey:   req.PrivateKey,
+		})
+		if err != nil {
+			return EnvInlineResult{}, err
+		}
+	}
+	if hasPassword && len(req.Passphrase) == 0 {
+		return EnvInlineResult{}, fmt.Errorf("passphrase is required for password inline tokens")
+	}
+
+	decrypted, report, err := envcrypt.Decrypt(data, envcrypt.DecryptRequest{
+		PrivateKey: privateKey,
+		Passphrase: req.Passphrase,
+	})
+	if err != nil {
+		return EnvInlineResult{}, err
+	}
+
+	outputPath := req.OutputPath
+	if outputPath == "" {
+		outputPath = defaultInlineDecryptOutputPath(req.InputPath, s.cfg.DefaultSuffix)
+	}
+	if err := writeFileSecure(outputPath, decrypted, 0o600); err != nil {
+		return EnvInlineResult{}, err
+	}
+	return EnvInlineResult{OutputPath: outputPath, Updated: report.UpdatedKeys}, nil
 }
 
 func (s Service) EncryptFile(req EncryptRequest) (string, error) {
@@ -318,4 +434,14 @@ func trimHomePrefix(path string) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+func defaultInlineDecryptOutputPath(inputPath, defaultSuffix string) string {
+	if defaultSuffix != "" && strings.HasSuffix(inputPath, defaultSuffix) {
+		return strings.TrimSuffix(inputPath, defaultSuffix)
+	}
+	if strings.HasSuffix(inputPath, ".dpx") {
+		return strings.TrimSuffix(inputPath, ".dpx")
+	}
+	return inputPath + ".dec"
 }

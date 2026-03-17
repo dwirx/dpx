@@ -11,6 +11,7 @@ import (
 
 	"github.com/dwirx/dpx/internal/app"
 	"github.com/dwirx/dpx/internal/config"
+	"github.com/dwirx/dpx/internal/crypto/agex"
 	"github.com/dwirx/dpx/internal/envelope"
 )
 
@@ -405,5 +406,132 @@ func TestKeygenRejectsSymlinkKeyPath(t *testing.T) {
 	}
 	if string(got) != "ORIGINAL" {
 		t.Fatalf("target file was modified via symlink: %q", got)
+	}
+}
+
+const envInlineSample = `# Test Environment Variables
+API_KEY=sk-secret-api-key-12345
+DATABASE_URL=postgres://user:password@localhost:5432/mydb
+JWT_SECRET=supersecretjwttoken
+REDIS_PASSWORD=redis123
+AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
+AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+
+# Comments are preserved
+DEBUG=true
+`
+
+func TestEnvInlinePasswordRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".env")
+	if err := os.WriteFile(path, []byte(envInlineSample), 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	svc := app.New(config.Default())
+	encrypted, err := svc.EncryptEnvInlineFile(app.EnvInlineEncryptRequest{
+		InputPath:    path,
+		Mode:         envelope.ModePassword,
+		Passphrase:   []byte("secret-123"),
+		SelectedKeys: []string{"API_KEY", "JWT_SECRET", "REDIS_PASSWORD"},
+	})
+	if err != nil {
+		t.Fatalf("encrypt inline env: %v", err)
+	}
+	if len(encrypted.Updated) != 3 {
+		t.Fatalf("expected 3 updated keys, got %#v", encrypted.Updated)
+	}
+
+	content, err := os.ReadFile(encrypted.OutputPath)
+	if err != nil {
+		t.Fatalf("read encrypted output: %v", err)
+	}
+	text := string(content)
+	if !strings.Contains(text, "API_KEY=ENC[pwd:v1:") || !strings.Contains(text, "JWT_SECRET=ENC[pwd:v1:") {
+		t.Fatalf("expected selected keys to be inline encrypted, got %q", text)
+	}
+	if !strings.Contains(text, "DATABASE_URL=postgres://user:password@localhost:5432/mydb") {
+		t.Fatalf("expected unselected key to remain plaintext")
+	}
+
+	decrypted, err := svc.DecryptEnvInlineFile(app.EnvInlineDecryptRequest{
+		InputPath:  encrypted.OutputPath,
+		Passphrase: []byte("secret-123"),
+		OutputPath: filepath.Join(dir, ".env.restored"),
+	})
+	if err != nil {
+		t.Fatalf("decrypt inline env: %v", err)
+	}
+	if len(decrypted.Updated) != 3 {
+		t.Fatalf("expected 3 decrypted keys, got %#v", decrypted.Updated)
+	}
+
+	restored, err := os.ReadFile(decrypted.OutputPath)
+	if err != nil {
+		t.Fatalf("read restored output: %v", err)
+	}
+	if string(restored) != envInlineSample {
+		t.Fatalf("restored mismatch\n--- got ---\n%s\n--- want ---\n%s", string(restored), envInlineSample)
+	}
+}
+
+func TestEnvInlineAgeRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".env")
+	if err := os.WriteFile(path, []byte(envInlineSample), 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	identity, err := agex.GenerateIdentity()
+	if err != nil {
+		t.Fatalf("generate identity: %v", err)
+	}
+
+	svc := app.New(config.Config{Age: config.AgeConfig{Recipients: []string{identity.PublicKey}}, DefaultSuffix: ".dpx", KeyFile: filepath.Join(dir, "age-keys.txt"), Version: 1, Discovery: config.Default().Discovery})
+	if err := os.WriteFile(filepath.Join(dir, "age-keys.txt"), []byte(identity.PrivateKey+"\n"), 0o600); err != nil {
+		t.Fatalf("write age key: %v", err)
+	}
+
+	encrypted, err := svc.EncryptEnvInlineFile(app.EnvInlineEncryptRequest{
+		InputPath:    path,
+		Mode:         envelope.ModeAge,
+		SelectedKeys: []string{"API_KEY", "JWT_SECRET"},
+	})
+	if err != nil {
+		t.Fatalf("encrypt age inline env: %v", err)
+	}
+	if len(encrypted.Updated) != 2 {
+		t.Fatalf("expected 2 updated keys, got %#v", encrypted.Updated)
+	}
+
+	mAge, mPwd, err := svc.DetectEnvInlineModes(encrypted.OutputPath)
+	if err != nil {
+		t.Fatalf("detect env inline modes: %v", err)
+	}
+	if !mAge || mPwd {
+		t.Fatalf("expected age=true password=false, got age=%v password=%v", mAge, mPwd)
+	}
+
+	decrypted, err := svc.DecryptEnvInlineFile(app.EnvInlineDecryptRequest{
+		InputPath:  encrypted.OutputPath,
+		OutputPath: filepath.Join(dir, ".env.restored"),
+	})
+	if err != nil {
+		t.Fatalf("decrypt age inline env: %v", err)
+	}
+	if len(decrypted.Updated) != 2 {
+		t.Fatalf("expected 2 decrypted keys, got %#v", decrypted.Updated)
+	}
+
+	restored, err := os.ReadFile(decrypted.OutputPath)
+	if err != nil {
+		t.Fatalf("read restored output: %v", err)
+	}
+	if string(restored) != envInlineSample {
+		t.Fatalf("restored mismatch\n--- got ---\n%s\n--- want ---\n%s", string(restored), envInlineSample)
 	}
 }

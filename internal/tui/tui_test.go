@@ -123,6 +123,166 @@ func TestModelEncryptPasswordRequiresConfirmation(t *testing.T) {
 	}
 }
 
+func TestModelEnvInlineEncryptPasswordRequiresConfirmation(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, ".env")
+	if err := os.WriteFile(envPath, []byte("API_KEY=secret\n"), 0o600); err != nil {
+		t.Fatalf("write .env: %v", err)
+	}
+
+	model, err := NewModel(app.New(config.Default()), config.Default(), dir, nil, io.Discard)
+	if err != nil {
+		t.Fatalf("new model: %v", err)
+	}
+
+	envEncryptIdx := optionIndex(model.options, "Env Inline Encrypt")
+	if envEncryptIdx < 0 {
+		t.Fatalf("missing Env Inline Encrypt option: %#v", model.options)
+	}
+	model.selection = envEncryptIdx
+	updated, _ := model.submitSelection()
+	menu := updated.(Model)
+	if menu.stage != stageEnvEncryptFile {
+		t.Fatalf("expected env encrypt file stage, got %v", menu.stage)
+	}
+
+	envFileIdx := -1
+	for i, option := range menu.options {
+		if strings.Contains(option, ".env") {
+			envFileIdx = i
+			break
+		}
+	}
+	if envFileIdx < 0 {
+		t.Fatalf("expected .env candidate, got %#v", menu.options)
+	}
+	menu.selection = envFileIdx
+	updated, _ = menu.submitSelection()
+	menu = updated.(Model)
+	if menu.stage != stageEnvEncryptMode {
+		t.Fatalf("expected env encrypt mode stage, got %v", menu.stage)
+	}
+
+	menu.selection = 1 // Password
+	updated, _ = menu.submitSelection()
+	menu = updated.(Model)
+	if menu.stage != stageEnvEncryptKeys {
+		t.Fatalf("expected env encrypt keys stage, got %v", menu.stage)
+	}
+	menu.input.SetValue("all")
+	updated, _ = menu.submitInput()
+	menu = updated.(Model)
+	if menu.stage != stageEnvEncryptPassword {
+		t.Fatalf("expected env encrypt password stage, got %v", menu.stage)
+	}
+
+	menu.input.SetValue("secret-123")
+	updated, _ = menu.submitInput()
+	menu = updated.(Model)
+	if menu.stage != stageEnvEncryptPasswordConfirm {
+		t.Fatalf("expected env encrypt password confirm stage, got %v", menu.stage)
+	}
+
+	menu.input.SetValue("wrong-secret")
+	updated, _ = menu.submitInput()
+	menu = updated.(Model)
+	if menu.stage != stageEnvEncryptPassword {
+		t.Fatalf("expected env encrypt password stage after mismatch, got %v", menu.stage)
+	}
+
+	menu.input.SetValue("secret-123")
+	updated, _ = menu.submitInput()
+	menu = updated.(Model)
+	if menu.stage != stageEnvEncryptPasswordConfirm {
+		t.Fatalf("expected env encrypt password confirm stage, got %v", menu.stage)
+	}
+	menu.input.SetValue("secret-123")
+	updated, _ = menu.submitInput()
+	menu = updated.(Model)
+	if menu.stage != stageEnvEncryptOutput {
+		t.Fatalf("expected env encrypt output stage, got %v", menu.stage)
+	}
+}
+
+func TestModelEnvInlineDecryptPasswordRequiresConfirmation(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	cfg := config.Default()
+	envPath := filepath.Join(dir, ".env")
+	if err := os.WriteFile(envPath, []byte("API_KEY=secret\n"), 0o600); err != nil {
+		t.Fatalf("write .env: %v", err)
+	}
+
+	svc := app.New(cfg)
+	encrypted, err := svc.EncryptEnvInlineFile(app.EnvInlineEncryptRequest{
+		InputPath:    envPath,
+		OutputPath:   envPath + cfg.DefaultSuffix,
+		Mode:         "password",
+		Passphrase:   []byte("secret-123"),
+		SelectedKeys: []string{"API_KEY"},
+	})
+	if err != nil {
+		t.Fatalf("encrypt env inline seed file: %v", err)
+	}
+
+	model, err := NewModel(svc, cfg, dir, nil, io.Discard)
+	if err != nil {
+		t.Fatalf("new model: %v", err)
+	}
+
+	envDecryptIdx := optionIndex(model.options, "Env Inline Decrypt")
+	if envDecryptIdx < 0 {
+		t.Fatalf("missing Env Inline Decrypt option: %#v", model.options)
+	}
+	model.selection = envDecryptIdx
+	updated, _ := model.submitSelection()
+	menu := updated.(Model)
+	if menu.stage != stageEnvDecryptFile {
+		t.Fatalf("expected env decrypt file stage, got %v", menu.stage)
+	}
+
+	decFileIdx := optionIndex(menu.options, encrypted.OutputPath)
+	if decFileIdx < 0 {
+		t.Fatalf("expected encrypted env file option %q, got %#v", encrypted.OutputPath, menu.options)
+	}
+	menu.selection = decFileIdx
+	updated, _ = menu.submitSelection()
+	menu = updated.(Model)
+	if menu.stage != stageEnvDecryptPassword {
+		t.Fatalf("expected env decrypt password stage, got %v", menu.stage)
+	}
+
+	menu.input.SetValue("secret-123")
+	updated, _ = menu.submitInput()
+	menu = updated.(Model)
+	if menu.stage != stageEnvDecryptPasswordConfirm {
+		t.Fatalf("expected env decrypt password confirm stage, got %v", menu.stage)
+	}
+
+	menu.input.SetValue("wrong-secret")
+	updated, _ = menu.submitInput()
+	menu = updated.(Model)
+	if menu.stage != stageEnvDecryptPassword {
+		t.Fatalf("expected env decrypt password stage after mismatch, got %v", menu.stage)
+	}
+
+	menu.input.SetValue("secret-123")
+	updated, _ = menu.submitInput()
+	menu = updated.(Model)
+	if menu.stage != stageEnvDecryptPasswordConfirm {
+		t.Fatalf("expected env decrypt password confirm stage, got %v", menu.stage)
+	}
+	menu.input.SetValue("secret-123")
+	updated, _ = menu.submitInput()
+	menu = updated.(Model)
+	if menu.stage != stageEnvDecryptOutput {
+		t.Fatalf("expected env decrypt output stage, got %v", menu.stage)
+	}
+}
+
 func TestModelEscBackReturnsToPreviousStage(t *testing.T) {
 	t.Parallel()
 

@@ -898,7 +898,7 @@ func TestRunEncryptAllowsManualPathWhenSuggestionsExist(t *testing.T) {
 		t.Fatalf("write manual file: %v", err)
 	}
 
-	stdin := strings.NewReader("3\n" + manualPath + "\nsecret-123\n")
+	stdin := strings.NewReader("3\n" + manualPath + "\nsecret-123\nsecret-123\n")
 	stdout := new(bytes.Buffer)
 	if err := run([]string{"encrypt"}, runOptions{
 		cwd:    dir,
@@ -926,7 +926,7 @@ func TestRunEncryptPromptsManualPathWhenNoSuggestions(t *testing.T) {
 		t.Fatalf("write manual file: %v", err)
 	}
 
-	stdin := strings.NewReader("1\n" + manualPath + "\nsecret-123\n")
+	stdin := strings.NewReader("1\n" + manualPath + "\nsecret-123\nsecret-123\n")
 	stdout := new(bytes.Buffer)
 	if err := run([]string{"encrypt"}, runOptions{
 		cwd:    dir,
@@ -956,7 +956,7 @@ func TestRunEncryptSuggestionsIncludeCommonFileTypes(t *testing.T) {
 		}
 	}
 
-	stdin := strings.NewReader("1\nsecret-123\n")
+	stdin := strings.NewReader("1\nsecret-123\nsecret-123\n")
 	stdout := new(bytes.Buffer)
 	if err := run([]string{"encrypt"}, runOptions{
 		cwd:    dir,
@@ -991,7 +991,7 @@ func TestRunEncryptCanSearchCandidateByKeyword(t *testing.T) {
 		t.Fatalf("write notes: %v", err)
 	}
 
-	stdin := strings.NewReader("4\nnotes\nsecret-123\n")
+	stdin := strings.NewReader("4\nnotes\nsecret-123\nsecret-123\n")
 	if err := run([]string{"encrypt"}, runOptions{
 		cwd:    dir,
 		stdin:  stdin,
@@ -1019,7 +1019,7 @@ func TestRunEncryptCanSwitchToEnvMode(t *testing.T) {
 		t.Fatalf("write notes: %v", err)
 	}
 
-	stdin := strings.NewReader("5\n1\nsecret-123\n")
+	stdin := strings.NewReader("5\n1\nsecret-123\nsecret-123\n")
 	if err := run([]string{"encrypt"}, runOptions{
 		cwd:    dir,
 		stdin:  stdin,
@@ -1208,7 +1208,7 @@ age:
 	stdout := new(bytes.Buffer)
 	if err := run([]string{sourcePath}, runOptions{
 		cwd:    dir,
-		stdin:  strings.NewReader("secret-123\n"),
+		stdin:  strings.NewReader("secret-123\nsecret-123\n"),
 		stdout: stdout,
 		stderr: new(bytes.Buffer),
 	}); err != nil {
@@ -1344,5 +1344,166 @@ func TestRunTUIPasswordConfirmationMismatchCanRetry(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "Password confirmation does not match") {
 		t.Fatalf("expected mismatch hint in output, got %q", stdout.String())
+	}
+}
+
+func TestRunEncryptPasswordConfirmationMismatchCanRetry(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, ".env")
+	if err := os.WriteFile(sourcePath, []byte("FOO=bar\n"), 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	stdout := new(bytes.Buffer)
+	if err := run([]string{"encrypt", sourcePath}, runOptions{
+		cwd:    dir,
+		stdin:  strings.NewReader("secret-123\nwrong\nsecret-123\nsecret-123\n"),
+		stdout: stdout,
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("run encrypt retry flow: %v", err)
+	}
+
+	if _, err := os.Stat(sourcePath + ".dpx"); err != nil {
+		t.Fatalf("expected encrypted output after retry: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "Password confirmation does not match") {
+		t.Fatalf("expected mismatch hint in output, got %q", stdout.String())
+	}
+	if strings.Count(stdout.String(), "Password: ") < 2 {
+		t.Fatalf("expected password prompt to appear more than once, got %q", stdout.String())
+	}
+}
+
+const envInlineCLIExample = `# Test Environment Variables
+API_KEY=sk-secret-api-key-12345
+DATABASE_URL=postgres://user:password@localhost:5432/mydb
+JWT_SECRET=supersecretjwttoken
+REDIS_PASSWORD=redis123
+AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
+AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+
+# Comments are preserved
+DEBUG=true
+`
+
+func TestRunEnvInlinePasswordEncryptDecrypt(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, ".env")
+	if err := os.WriteFile(sourcePath, []byte(envInlineCLIExample), 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	encryptOut := new(bytes.Buffer)
+	if err := run([]string{"env", "encrypt", sourcePath, "--mode", "password", "--keys", "API_KEY,JWT_SECRET,REDIS_PASSWORD", "--password", "secret-123"}, runOptions{
+		cwd:    dir,
+		stdin:  strings.NewReader(""),
+		stdout: encryptOut,
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("run env encrypt password: %v", err)
+	}
+	if !strings.Contains(encryptOut.String(), "Updated keys (3)") {
+		t.Fatalf("expected updated key count in output, got %q", encryptOut.String())
+	}
+
+	encryptedPath := sourcePath + ".dpx"
+	encryptedData, err := os.ReadFile(encryptedPath)
+	if err != nil {
+		t.Fatalf("read encrypted file: %v", err)
+	}
+	encryptedText := string(encryptedData)
+	if !strings.Contains(encryptedText, "API_KEY=ENC[pwd:v1:") || !strings.Contains(encryptedText, "JWT_SECRET=ENC[pwd:v1:") {
+		t.Fatalf("expected inline password tokens, got %q", encryptedText)
+	}
+	if !strings.Contains(encryptedText, "DATABASE_URL=postgres://user:password@localhost:5432/mydb") {
+		t.Fatalf("expected unselected key to remain plaintext")
+	}
+
+	restoredPath := filepath.Join(dir, ".env.restored")
+	if err := run([]string{"env", "decrypt", encryptedPath, "--password", "secret-123", "--out", restoredPath}, runOptions{
+		cwd:    dir,
+		stdin:  strings.NewReader(""),
+		stdout: new(bytes.Buffer),
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("run env decrypt password: %v", err)
+	}
+	restoredData, err := os.ReadFile(restoredPath)
+	if err != nil {
+		t.Fatalf("read restored: %v", err)
+	}
+	if string(restoredData) != envInlineCLIExample {
+		t.Fatalf("restored mismatch\n--- got ---\n%s\n--- want ---\n%s", string(restoredData), envInlineCLIExample)
+	}
+}
+
+func TestRunEnvInlineAgeEncryptDecrypt(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, ".env")
+	if err := os.WriteFile(sourcePath, []byte(envInlineCLIExample), 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	keyPath := filepath.Join(dir, "age-keys.txt")
+	if err := run([]string{"keygen", "--out", keyPath}, runOptions{cwd: dir, stdin: strings.NewReader(""), stdout: new(bytes.Buffer), stderr: new(bytes.Buffer)}); err != nil {
+		t.Fatalf("run keygen: %v", err)
+	}
+
+	encryptOut := new(bytes.Buffer)
+	if err := run([]string{"env", "encrypt", sourcePath, "--mode", "age", "--keys", "API_KEY,JWT_SECRET"}, runOptions{cwd: dir, stdin: strings.NewReader(""), stdout: encryptOut, stderr: new(bytes.Buffer)}); err != nil {
+		t.Fatalf("run env encrypt age: %v", err)
+	}
+	if !strings.Contains(encryptOut.String(), "Updated keys (2)") {
+		t.Fatalf("expected updated key count in output, got %q", encryptOut.String())
+	}
+
+	encryptedPath := sourcePath + ".dpx"
+	restoredPath := filepath.Join(dir, ".env.restored")
+	if err := run([]string{"env", "decrypt", encryptedPath, "--out", restoredPath}, runOptions{cwd: dir, stdin: strings.NewReader(""), stdout: new(bytes.Buffer), stderr: new(bytes.Buffer)}); err != nil {
+		t.Fatalf("run env decrypt age: %v", err)
+	}
+	restoredData, err := os.ReadFile(restoredPath)
+	if err != nil {
+		t.Fatalf("read restored: %v", err)
+	}
+	if string(restoredData) != envInlineCLIExample {
+		t.Fatalf("restored mismatch\n--- got ---\n%s\n--- want ---\n%s", string(restoredData), envInlineCLIExample)
+	}
+}
+
+func TestRunEnvInlineEncryptPromptsKeySelection(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, ".env")
+	if err := os.WriteFile(sourcePath, []byte(envInlineCLIExample), 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	input := strings.NewReader("1,3\nsecret-123\nsecret-123\n")
+	stdout := new(bytes.Buffer)
+	if err := run([]string{"env", "encrypt", sourcePath, "--mode", "password"}, runOptions{cwd: dir, stdin: input, stdout: stdout, stderr: new(bytes.Buffer)}); err != nil {
+		t.Fatalf("run env encrypt interactive key selection: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "Select keys to encrypt") {
+		t.Fatalf("expected key selection prompt, got %q", stdout.String())
+	}
+	data, err := os.ReadFile(sourcePath + ".dpx")
+	if err != nil {
+		t.Fatalf("read encrypted output: %v", err)
+	}
+	text := string(data)
+	if !strings.Contains(text, "API_KEY=ENC[pwd:v1:") {
+		t.Fatalf("expected API_KEY encrypted, got %q", text)
+	}
+	if !strings.Contains(text, "JWT_SECRET=supersecretjwttoken") {
+		t.Fatalf("expected JWT_SECRET to remain plaintext for this selection")
 	}
 }

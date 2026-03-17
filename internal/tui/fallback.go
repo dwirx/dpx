@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/dwirx/dpx/internal/app"
@@ -17,7 +18,7 @@ func RunFallback(svc app.Service, cfg config.Config, cwd string, stdin io.Reader
 	reader := bufio.NewReader(stdin)
 	renderHeader(stdout)
 
-	action, err := chooseString(reader, stdout, "Choose an action", []string{"Encrypt", "Decrypt", "Inspect", "Auto", "Import Key", "Doctor"})
+	action, err := chooseString(reader, stdout, "Choose an action", []string{"Encrypt", "Decrypt", "Inspect", "Auto", "Import Key", "Doctor", "Env Inline Encrypt", "Env Inline Decrypt"})
 	if err != nil {
 		return err
 	}
@@ -185,6 +186,10 @@ func RunFallback(svc app.Service, cfg config.Config, cwd string, stdin io.Reader
 		}
 		fmt.Fprintf(stdout, "Encrypted %s -> %s\n", req.InputPath, outputPath)
 		return nil
+	case "Env Inline Encrypt":
+		return runEnvInlineEncryptFallback(reader, stdout, svc, cfg, cwd)
+	case "Env Inline Decrypt":
+		return runEnvInlineDecryptFallback(reader, stdout, svc, cfg, cwd)
 	case "Import Key":
 		source, err := chooseString(reader, stdout, "Import source", []string{"From file", "Paste key block"})
 		if err != nil {
@@ -236,8 +241,159 @@ func RunFallback(svc app.Service, cfg config.Config, cwd string, stdin io.Reader
 func renderHeader(w io.Writer) {
 	fmt.Fprintln(w, "╭──────────────────────────────────────────────────────────────╮")
 	fmt.Fprintln(w, "│ DPX TUI                                                      │")
-	fmt.Fprintln(w, "│ Encrypt/decrypt/inspect/import/doctor workflow               │")
+	fmt.Fprintln(w, "│ Encrypt/decrypt/inspect/env-inline/import/doctor workflow    │")
 	fmt.Fprintln(w, "╰──────────────────────────────────────────────────────────────╯")
+}
+
+func runEnvInlineEncryptFallback(reader *bufio.Reader, stdout io.Writer, svc app.Service, cfg config.Config, cwd string) error {
+	inputPath, err := chooseEncryptPathFallback(reader, stdout, svc, cwd)
+	if err != nil {
+		return err
+	}
+	mode, err := chooseString(reader, stdout, "Choose inline env encryption mode", []string{"Age", "Password"})
+	if err != nil {
+		return err
+	}
+	keys, err := svc.ListEnvInlineKeys(inputPath)
+	if err != nil {
+		return err
+	}
+	selectedKeys, err := chooseEnvKeysFallback(reader, stdout, keys)
+	if err != nil {
+		return err
+	}
+
+	req := app.EnvInlineEncryptRequest{
+		InputPath:    inputPath,
+		SelectedKeys: selectedKeys,
+	}
+	if mode == "Age" {
+		req.Mode = envelope.ModeAge
+		req.Recipients = append([]string{}, cfg.Age.Recipients...)
+		if len(req.Recipients) == 0 {
+			text, err := prompt(reader, stdout, "Recipients (comma-separated): ")
+			if err != nil {
+				return err
+			}
+			req.Recipients = splitCSV(text)
+		}
+	} else {
+		req.Mode = envelope.ModePassword
+		passphrase, err := promptPasswordWithConfirmation(reader, stdout)
+		if err != nil {
+			return err
+		}
+		req.Passphrase = passphrase
+	}
+
+	out, err := prompt(reader, stdout, fmt.Sprintf("Output path [%s]: ", req.InputPath+cfg.DefaultSuffix))
+	if err != nil {
+		return err
+	}
+	req.OutputPath = strings.TrimSpace(out)
+	result, err := svc.EncryptEnvInlineFile(req)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "Env inline encrypted %s -> %s\n", req.InputPath, result.OutputPath)
+	fmt.Fprintf(stdout, "Updated keys (%d): %s\n", len(result.Updated), strings.Join(result.Updated, ", "))
+	return nil
+}
+
+func runEnvInlineDecryptFallback(reader *bufio.Reader, stdout io.Writer, svc app.Service, cfg config.Config, cwd string) error {
+	files, err := findEncryptedFiles(cwd)
+	if err != nil {
+		return err
+	}
+	filePath := ""
+	if len(files) == 0 {
+		filePath, err = prompt(reader, stdout, "Env .dpx file path: ")
+		if err != nil {
+			return err
+		}
+		filePath = strings.TrimSpace(filePath)
+		if filePath == "" {
+			return fmt.Errorf("file path is required")
+		}
+	} else {
+		filePath, err = chooseString(reader, stdout, "Select a .env.dpx file to decrypt", files)
+		if err != nil {
+			return err
+		}
+	}
+
+	hasAge, hasPassword, err := svc.DetectEnvInlineModes(filePath)
+	if err != nil {
+		return err
+	}
+	req := app.EnvInlineDecryptRequest{
+		InputPath:    filePath,
+		IdentityPath: cfg.KeyFile,
+	}
+	if hasPassword {
+		pass, err := promptPasswordWithConfirmation(reader, stdout)
+		if err != nil {
+			return err
+		}
+		req.Passphrase = pass
+	}
+	if !hasAge {
+		req.IdentityPath = ""
+	}
+	out, err := prompt(reader, stdout, "Output path [default]: ")
+	if err != nil {
+		return err
+	}
+	req.OutputPath = strings.TrimSpace(out)
+	result, err := svc.DecryptEnvInlineFile(req)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "Env inline decrypted %s -> %s\n", req.InputPath, result.OutputPath)
+	fmt.Fprintf(stdout, "Updated keys (%d): %s\n", len(result.Updated), strings.Join(result.Updated, ", "))
+	return nil
+}
+
+func chooseEnvKeysFallback(reader *bufio.Reader, stdout io.Writer, keys []string) ([]string, error) {
+	if len(keys) == 0 {
+		return nil, fmt.Errorf("no encryptable env keys found")
+	}
+	fmt.Fprintln(stdout, "Select keys to encrypt:")
+	for i, key := range keys {
+		fmt.Fprintf(stdout, "  %d. %s\n", i+1, key)
+	}
+	raw, err := prompt(reader, stdout, `Keys (comma-separated indexes or "all"): `)
+	if err != nil {
+		return nil, err
+	}
+	raw = strings.TrimSpace(strings.ToLower(raw))
+	if raw == "" || raw == "all" {
+		return append([]string{}, keys...), nil
+	}
+
+	parts := strings.Split(raw, ",")
+	seen := make(map[string]struct{})
+	selected := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		index, convErr := strconv.Atoi(part)
+		if convErr != nil || index < 1 || index > len(keys) {
+			return nil, fmt.Errorf("invalid key index %q", part)
+		}
+		key := keys[index-1]
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		selected = append(selected, key)
+	}
+	if len(selected) == 0 {
+		return nil, fmt.Errorf("no keys selected")
+	}
+	return selected, nil
 }
 
 func chooseEncryptPathFallback(reader *bufio.Reader, stdout io.Writer, svc app.Service, cwd string) (string, error) {

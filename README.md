@@ -6,12 +6,14 @@ It supports two practical encryption modes:
 - `age` for public-key workflows and team sharing
 - `Argon2id + XChaCha20-Poly1305` for password-based encryption
 
-## Features
+## ✨ Features
 
 - Encrypt `.env` into `.env.dpx`
 - Decrypt back to the original filename by default
-- CLI and interactive TUI modes
+- Guided CLI and interactive TUI modes
 - Smart file suggestions for `.env`, `.env.*`, `*.env`, `.secret*`, `.credentials*`
+- Inline `.env` key encryption: `API_KEY=ENC[age:...]` / `ENC[pwd:v1:...]`
+- Password confirmation on encrypt flows (CLI + TUI) to reduce typo risk
 - Safe `uninstall` command with confirmation and cleanup flags
 - `doctor` command to check config, key, and project readiness
 - Hidden password prompt on real terminals
@@ -19,7 +21,7 @@ It supports two practical encryption modes:
 - GitHub Actions CI and manual release workflow
 - Quick install scripts for Linux, macOS, and Windows
 
-## Quick Install
+## 🚀 Quick Install
 
 Recommended install from GitHub Releases.
 
@@ -41,7 +43,7 @@ After install:
 dpx --version
 ```
 
-## Download Binary
+## 📦 Download Binary
 
 Download from GitHub Releases:
 
@@ -69,13 +71,13 @@ Windows:
 - Move `dpx.exe` to a folder in your `PATH`
 - Run `dpx --version`
 
-## Install via Go
+## 🧰 Install via Go
 
 ```bash
 go install github.com/dwirx/dpx/cmd/dpx@latest
 ```
 
-## Build From Source
+## 🛠️ Build From Source
 
 ```bash
 git clone https://github.com/dwirx/dpx
@@ -84,7 +86,7 @@ go build -o dpx ./cmd/dpx
 sudo mv dpx /usr/local/bin/  # Linux/macOS
 ```
 
-## Quick Start
+## ⚡ Quick Start
 
 ### 1. Initialize a project
 
@@ -147,7 +149,19 @@ Output:
 Decrypted .env.dpx -> .env
 ```
 
-### 5. Use the TUI
+### 5. Use interactive CLI (guided)
+
+```bash
+dpx encrypt
+```
+
+Typical guided flow:
+- pick a file from suggestions or manual path
+- choose mode (`age` or `password`)
+- if password mode, type password + confirm password
+- confirm output path
+
+### 6. Use the TUI
 
 ```bash
 dpx tui
@@ -157,10 +171,10 @@ The TUI can:
 - choose `Encrypt`, `Decrypt`, or `Inspect`
 - suggest likely secret files
 - choose `Password` or `Age`
-- prompt for recipients or password
+- prompt for recipients or password (+ confirmation when encrypting)
 - confirm output path
 
-## Common Usage
+## 🧭 Common Usage
 
 ### Encrypt with a password
 
@@ -169,6 +183,10 @@ Prompt for password interactively:
 ```bash
 dpx encrypt .env
 ```
+
+DPX will ask:
+- `Password:`
+- `Confirm password:`
 
 Pass the password explicitly:
 
@@ -222,6 +240,32 @@ Restore to a different path:
 dpx decrypt .env.dpx --out .env.restored
 ```
 
+### Inline `.env` key encryption
+
+Encrypt selected keys only (values become `ENC[...]` inline):
+
+```bash
+dpx env encrypt .env --mode password --keys API_KEY,JWT_SECRET
+```
+
+Decrypt inline encrypted keys:
+
+```bash
+dpx env decrypt .env.dpx
+```
+
+Interactive inline flow:
+
+```bash
+dpx env encrypt
+```
+
+DPX can prompt for:
+- `.env` file selection
+- mode (`age` or `password`)
+- key selection (`all` or specific indexes)
+- password + confirm password (for password mode)
+
 ### Inspect metadata safely
 
 ```bash
@@ -272,7 +316,7 @@ Full cleanup without prompt:
 dpx uninstall --yes --remove-key --remove-encrypted
 ```
 
-## CLI Reference
+## 📚 CLI Reference
 
 ### `dpx init`
 
@@ -310,7 +354,8 @@ Rules:
 - `--password` selects password mode
 - `--age` selects `age` mode
 - if no output is provided, output becomes `<file>.dpx`
-- if no file is provided in interactive mode, DPX suggests local candidates
+- if no file is provided, DPX starts guided picker/search flow
+- if password is prompted interactively, DPX asks password confirmation
 
 ### `dpx decrypt <file.dpx> [--password <text>] [--identity <path>] [--out <path>]`
 
@@ -320,6 +365,19 @@ Rules:
 - DPX auto-detects password or `age` mode from metadata
 - if no output is provided, DPX restores the original filename from metadata
 - if password mode is detected and no password is provided, DPX prompts for it
+
+### `dpx env encrypt [<file>] [--mode age|password] [--keys <csv>] [--recipient <csv>] [--password <text>] [--out <path>]`
+
+Encrypt selected `.env` keys inline into `ENC[...]` values.
+
+Rules:
+- when `<file>` is omitted, DPX suggests `.env` candidates
+- when `--keys` is omitted, DPX asks interactive key selection
+- in interactive password mode, DPX asks password confirmation
+
+### `dpx env decrypt [<file.dpx>] [--password <text>] [--identity <path>] [--out <path>]`
+
+Decrypt inline encrypted `ENC[...]` values back into plaintext env values.
 
 ### `dpx inspect <file.dpx>`
 

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"golang.org/x/term"
@@ -136,6 +137,8 @@ func run(args []string, opts runOptions) error {
 		return runDecrypt(svc, args[1:], opts)
 	case "inspect":
 		return runInspect(svc, args[1:], opts)
+	case "env":
+		return runEnv(svc, cfg, args[1:], opts)
 	case "tui":
 		return runTUI(svc, cfg, opts)
 	default:
@@ -519,7 +522,7 @@ func runEncrypt(svc app.Service, cfg config.Config, args []string, opts runOptio
 	case envelope.ModePassword:
 		req.Passphrase = []byte(parsed.passwordText)
 		if len(req.Passphrase) == 0 {
-			pass, err := promptSecret(opts, "Password: ")
+			pass, err := promptSecretWithConfirmation(opts, "Password: ", "Confirm password: ")
 			if err != nil {
 				return err
 			}
@@ -602,6 +605,234 @@ func runInspect(svc app.Service, args []string, opts runOptions) error {
 		fmt.Fprintf(opts.stdout, "KDF: %s\n", meta.KDF.Algorithm)
 	}
 	return nil
+}
+
+type envEncryptArgs struct {
+	filePath       string
+	mode           string
+	outPath        string
+	keysText       string
+	recipientsText string
+	passwordText   string
+}
+
+type envDecryptArgs struct {
+	filePath     string
+	outPath      string
+	passwordText string
+	identityPath string
+}
+
+func runEnv(svc app.Service, cfg config.Config, args []string, opts runOptions) error {
+	if len(args) == 0 {
+		return fmt.Errorf("env requires subcommand: encrypt or decrypt")
+	}
+	subcommand := strings.ToLower(strings.TrimSpace(args[0]))
+	switch subcommand {
+	case "encrypt", "enc":
+		return runEnvEncrypt(svc, cfg, args[1:], opts)
+	case "decrypt", "dec":
+		return runEnvDecrypt(svc, cfg, args[1:], opts)
+	default:
+		return fmt.Errorf("unknown env subcommand %q", subcommand)
+	}
+}
+
+func runEnvEncrypt(svc app.Service, cfg config.Config, args []string, opts runOptions) error {
+	parsed, err := parseEnvEncryptArgs(args)
+	if err != nil {
+		return err
+	}
+
+	filePath := strings.TrimSpace(parsed.filePath)
+	if filePath == "" {
+		filePath, err = chooseEnvInlineSource(opts, svc, opts.cwd)
+		if err != nil {
+			return err
+		}
+	}
+
+	mode := strings.TrimSpace(strings.ToLower(parsed.mode))
+	if mode == "" {
+		mode, err = chooseString(opts, "Choose env encryption mode", []string{"age", "password"})
+		if err != nil {
+			return err
+		}
+	}
+	if mode != envelope.ModeAge && mode != envelope.ModePassword {
+		return fmt.Errorf("unsupported env mode %q", mode)
+	}
+
+	keys := splitCSV(parsed.keysText)
+	if len(keys) == 0 {
+		availableKeys, err := svc.ListEnvInlineKeys(filePath)
+		if err != nil {
+			return err
+		}
+		keys, err = chooseEnvKeys(opts, availableKeys)
+		if err != nil {
+			return err
+		}
+	}
+
+	req := app.EnvInlineEncryptRequest{
+		InputPath:    filePath,
+		OutputPath:   parsed.outPath,
+		Mode:         mode,
+		SelectedKeys: keys,
+	}
+	switch mode {
+	case envelope.ModeAge:
+		req.Recipients = splitCSV(parsed.recipientsText)
+		if len(req.Recipients) == 0 {
+			req.Recipients = append([]string{}, cfg.Age.Recipients...)
+		}
+	case envelope.ModePassword:
+		req.Passphrase = []byte(parsed.passwordText)
+		if len(req.Passphrase) == 0 {
+			pass, err := promptSecretWithConfirmation(opts, "Password: ", "Confirm password: ")
+			if err != nil {
+				return err
+			}
+			req.Passphrase = []byte(pass)
+		}
+	}
+
+	result, err := svc.EncryptEnvInlineFile(req)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(opts.stdout, "Env inline encrypted %s -> %s\n", req.InputPath, result.OutputPath)
+	fmt.Fprintf(opts.stdout, "Updated keys (%d): %s\n", len(result.Updated), strings.Join(result.Updated, ", "))
+	return nil
+}
+
+func runEnvDecrypt(svc app.Service, cfg config.Config, args []string, opts runOptions) error {
+	parsed, err := parseEnvDecryptArgs(args)
+	if err != nil {
+		return err
+	}
+	filePath := strings.TrimSpace(parsed.filePath)
+	if filePath == "" {
+		files, err := findEncryptedFiles(opts.cwd)
+		if err != nil {
+			return err
+		}
+		if len(files) == 0 {
+			filePath, err = prompt(opts, "Env .dpx file path: ")
+			if err != nil {
+				return err
+			}
+			filePath = strings.TrimSpace(filePath)
+			if filePath == "" {
+				return fmt.Errorf("file path is required")
+			}
+		} else {
+			filePath, err = chooseString(opts, "Select a .env.dpx file to decrypt", files)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	hasAge, hasPassword, err := svc.DetectEnvInlineModes(filePath)
+	if err != nil {
+		return err
+	}
+
+	req := app.EnvInlineDecryptRequest{
+		InputPath:    filePath,
+		OutputPath:   parsed.outPath,
+		IdentityPath: parsed.identityPath,
+	}
+	if hasPassword {
+		req.Passphrase = []byte(parsed.passwordText)
+		if len(req.Passphrase) == 0 {
+			pass, err := promptSecret(opts, "Password: ")
+			if err != nil {
+				return err
+			}
+			req.Passphrase = []byte(pass)
+		}
+	}
+	if hasAge && req.IdentityPath == "" {
+		req.IdentityPath = cfg.KeyFile
+	}
+
+	result, err := svc.DecryptEnvInlineFile(req)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(opts.stdout, "Env inline decrypted %s -> %s\n", req.InputPath, result.OutputPath)
+	fmt.Fprintf(opts.stdout, "Updated keys (%d): %s\n", len(result.Updated), strings.Join(result.Updated, ", "))
+	return nil
+}
+
+func chooseEnvInlineSource(opts runOptions, svc app.Service, cwd string) (string, error) {
+	candidates, err := svc.Discover(cwd)
+	if err != nil {
+		return "", err
+	}
+	options := candidatePaths(candidates)
+	options = append(options, manualEncryptPathOption)
+	choice, err := chooseString(opts, "Select a .env file for inline encryption", options)
+	if err != nil {
+		return "", err
+	}
+	if choice == manualEncryptPathOption {
+		path, err := prompt(opts, "Env file path: ")
+		if err != nil {
+			return "", err
+		}
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return "", fmt.Errorf("file path is required")
+		}
+		return path, nil
+	}
+	return choice, nil
+}
+
+func chooseEnvKeys(opts runOptions, keys []string) ([]string, error) {
+	if len(keys) == 0 {
+		return nil, fmt.Errorf("no encryptable env keys found")
+	}
+	fmt.Fprintln(opts.stdout, "Select keys to encrypt:")
+	for i, key := range keys {
+		fmt.Fprintf(opts.stdout, "  %d. %s\n", i+1, key)
+	}
+	fmt.Fprintln(opts.stdout, `Enter comma-separated indexes or "all".`)
+	input, err := prompt(opts, "Keys: ")
+	if err != nil {
+		return nil, err
+	}
+	input = strings.TrimSpace(strings.ToLower(input))
+	if input == "" || input == "all" {
+		return append([]string{}, keys...), nil
+	}
+	parts := strings.Split(input, ",")
+	selected := make([]string, 0, len(parts))
+	seen := make(map[string]struct{})
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		index, err := strconv.Atoi(part)
+		if err != nil || index < 1 || index > len(keys) {
+			return nil, fmt.Errorf("invalid key index %q", part)
+		}
+		key := keys[index-1]
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		selected = append(selected, key)
+	}
+	if len(selected) == 0 {
+		return nil, fmt.Errorf("no keys selected")
+	}
+	return selected, nil
 }
 
 func runTUI(svc app.Service, cfg config.Config, opts runOptions) error {
@@ -872,6 +1103,26 @@ func promptSecret(opts runOptions, label string) (string, error) {
 	return prompt(opts, label)
 }
 
+func promptSecretWithConfirmation(opts runOptions, label, confirmLabel string) (string, error) {
+	for {
+		pass, err := promptSecret(opts, label)
+		if err != nil {
+			return "", err
+		}
+		if strings.TrimSpace(pass) == "" {
+			return "", fmt.Errorf("password is required")
+		}
+		confirm, err := promptSecret(opts, confirmLabel)
+		if err != nil {
+			return "", err
+		}
+		if pass == confirm {
+			return pass, nil
+		}
+		fmt.Fprintln(opts.stdout, "Password confirmation does not match. Try again.")
+	}
+}
+
 func getReader(opts runOptions) *bufio.Reader {
 	if opts.reader != nil {
 		return opts.reader
@@ -898,6 +1149,7 @@ var commandAliases = map[string]string{
 	"init":      "init",
 	"doctor":    "doctor",
 	"uninstall": "uninstall",
+	"env":       "env",
 	"keygen":    "keygen",
 	"encrypt":   "encrypt",
 	"enc":       "encrypt",
@@ -951,7 +1203,7 @@ func suggestCommand(input string) string {
 	if strings.TrimSpace(input) == "" {
 		return ""
 	}
-	candidates := []string{"init", "doctor", "uninstall", "keygen", "encrypt", "decrypt", "inspect", "tui", "version", "help"}
+	candidates := []string{"init", "doctor", "uninstall", "env", "keygen", "encrypt", "decrypt", "inspect", "tui", "version", "help"}
 	best := ""
 	bestDistance := 99
 	for _, candidate := range candidates {
@@ -1163,6 +1415,92 @@ type encryptArgs struct {
 	useAge         bool
 }
 
+func parseEnvEncryptArgs(args []string) (envEncryptArgs, error) {
+	var parsed envEncryptArgs
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch arg {
+		case "--out":
+			i++
+			if i >= len(args) {
+				return parsed, fmt.Errorf("missing value for --out")
+			}
+			parsed.outPath = args[i]
+		case "--mode":
+			i++
+			if i >= len(args) {
+				return parsed, fmt.Errorf("missing value for --mode")
+			}
+			parsed.mode = strings.ToLower(strings.TrimSpace(args[i]))
+		case "--keys":
+			i++
+			if i >= len(args) {
+				return parsed, fmt.Errorf("missing value for --keys")
+			}
+			parsed.keysText = args[i]
+		case "--recipient":
+			i++
+			if i >= len(args) {
+				return parsed, fmt.Errorf("missing value for --recipient")
+			}
+			parsed.recipientsText = args[i]
+		case "--password":
+			i++
+			if i >= len(args) {
+				return parsed, fmt.Errorf("missing value for --password")
+			}
+			parsed.passwordText = args[i]
+		default:
+			if strings.HasPrefix(arg, "--") {
+				return parsed, fmt.Errorf("unknown flag %q", arg)
+			}
+			if parsed.filePath == "" {
+				parsed.filePath = arg
+				continue
+			}
+			return parsed, fmt.Errorf("unexpected argument %q", arg)
+		}
+	}
+	return parsed, nil
+}
+
+func parseEnvDecryptArgs(args []string) (envDecryptArgs, error) {
+	var parsed envDecryptArgs
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch arg {
+		case "--out":
+			i++
+			if i >= len(args) {
+				return parsed, fmt.Errorf("missing value for --out")
+			}
+			parsed.outPath = args[i]
+		case "--password":
+			i++
+			if i >= len(args) {
+				return parsed, fmt.Errorf("missing value for --password")
+			}
+			parsed.passwordText = args[i]
+		case "--identity":
+			i++
+			if i >= len(args) {
+				return parsed, fmt.Errorf("missing value for --identity")
+			}
+			parsed.identityPath = args[i]
+		default:
+			if strings.HasPrefix(arg, "--") {
+				return parsed, fmt.Errorf("unknown flag %q", arg)
+			}
+			if parsed.filePath == "" {
+				parsed.filePath = arg
+				continue
+			}
+			return parsed, fmt.Errorf("unexpected argument %q", arg)
+		}
+	}
+	return parsed, nil
+}
+
 func parseEncryptArgs(args []string) (encryptArgs, error) {
 	var parsed encryptArgs
 	for i := 0; i < len(args); i++ {
@@ -1255,11 +1593,15 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  dpx .env                  # encrypt")
 	fmt.Fprintln(w, "  dpx notes.txt             # encrypt any file")
 	fmt.Fprintln(w, "  dpx .env.dpx              # decrypt")
+	fmt.Fprintln(w, "  dpx encrypt               # interactive file picker + prompts")
+	fmt.Fprintln(w, "  dpx env encrypt           # interactive .env inline flow")
 	fmt.Fprintln(w, "  dpx e .env                # short alias for encrypt")
 	fmt.Fprintln(w, "  dpx d .env.dpx            # short alias for decrypt")
 	fmt.Fprintln(w, "  dpx encr .env             # prefix command (auto-resolve to encrypt)")
 	fmt.Fprintln(w, "  dpx decr .env.dpx         # prefix command (auto-resolve to decrypt)")
 	fmt.Fprintln(w, "  dpx uninstall --yes --remove-key --remove-encrypted")
+	fmt.Fprintln(w, "  dpx env encrypt .env --mode age --keys API_KEY,JWT_SECRET")
+	fmt.Fprintln(w, "  dpx env decrypt .env.dpx --password <pass>")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Commands:")
 	fmt.Fprintln(w, "  init")
@@ -1270,12 +1612,18 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  tui")
 	fmt.Fprintln(w, "  doctor")
 	fmt.Fprintln(w, "  uninstall")
+	fmt.Fprintln(w, "  env (encrypt|decrypt)")
 	fmt.Fprintln(w, "  version")
 	fmt.Fprintln(w, "  help")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Flags:")
 	fmt.Fprintln(w, "  --version, -v")
 	fmt.Fprintln(w, "  uninstall: --yes --remove-key --remove-encrypted")
+	fmt.Fprintln(w, "  env encrypt: --mode --keys --recipient --password --out")
+	fmt.Fprintln(w, "  env decrypt: --password --identity --out")
+	fmt.Fprintln(w, "Notes:")
+	fmt.Fprintln(w, "  - Password prompts are interactive and require confirmation when encrypting")
+	fmt.Fprintln(w, "  - Omit file args to use guided picker/search flow")
 }
 
 func expandHome(path string) string {
