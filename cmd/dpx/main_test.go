@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/dwirx/dpx/internal/config"
 )
 
 func TestRunInitCreatesConfig(t *testing.T) {
@@ -166,6 +168,65 @@ func TestRunKeygenWritesIdentityFile(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "AGE-SECRET-KEY-") {
 		t.Fatalf("expected age secret key, got %q", string(data))
+	}
+
+	cfgPath := filepath.Join(dir, ".dpx.yaml")
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load .dpx.yaml: %v", err)
+	}
+	if cfg.KeyFile != keyPath {
+		t.Fatalf("expected key_file=%q, got %q", keyPath, cfg.KeyFile)
+	}
+	if len(cfg.Age.Recipients) == 0 {
+		t.Fatalf("expected recipient to be added into config")
+	}
+	if !strings.HasPrefix(cfg.Age.Recipients[len(cfg.Age.Recipients)-1], "age1") {
+		t.Fatalf("expected age recipient, got %q", cfg.Age.Recipients[len(cfg.Age.Recipients)-1])
+	}
+}
+
+func TestRunKeygenAppendsRecipientToExistingConfig(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, ".dpx.yaml")
+	initial := `version: 1
+default_suffix: ".dpx"
+key_file: "~/.config/dpx/age-keys.txt"
+age:
+  recipients:
+    - "age1existingrecipientxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+`
+	if err := os.WriteFile(cfgPath, []byte(initial), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	keyPath := filepath.Join(dir, "age-keys.txt")
+	if err := run([]string{"keygen", "--out", keyPath}, runOptions{
+		cwd:    dir,
+		stdin:  strings.NewReader(""),
+		stdout: new(bytes.Buffer),
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("run keygen: %v", err)
+	}
+
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.KeyFile != keyPath {
+		t.Fatalf("expected key_file=%q, got %q", keyPath, cfg.KeyFile)
+	}
+	if len(cfg.Age.Recipients) < 2 {
+		t.Fatalf("expected recipient to be appended, got %#v", cfg.Age.Recipients)
+	}
+	if cfg.Age.Recipients[0] != "age1existingrecipientxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" {
+		t.Fatalf("expected existing recipient preserved, got %#v", cfg.Age.Recipients)
+	}
+	if !strings.HasPrefix(cfg.Age.Recipients[len(cfg.Age.Recipients)-1], "age1") {
+		t.Fatalf("expected generated age recipient, got %q", cfg.Age.Recipients[len(cfg.Age.Recipients)-1])
 	}
 }
 

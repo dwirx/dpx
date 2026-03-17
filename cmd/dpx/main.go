@@ -161,13 +161,23 @@ func runKeygen(svc app.Service, cfg config.Config, args []string, opts runOption
 	fs := flag.NewFlagSet("keygen", flag.ContinueOnError)
 	fs.SetOutput(opts.stderr)
 	outPath := fs.String("out", cfg.KeyFile, "path to write private key")
+	noConfigUpdate := fs.Bool("no-config-update", false, "skip updating .dpx.yaml with generated public key")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
-	identity, err := svc.Keygen(expandHome(*outPath))
+	keyPath := expandHome(*outPath)
+	identity, err := svc.Keygen(keyPath)
 	if err != nil {
 		return err
+	}
+
+	var syncResult keygenConfigSyncResult
+	if !*noConfigUpdate {
+		syncResult, err = syncKeygenConfig(opts.cwd, *outPath, identity.PublicKey)
+		if err != nil {
+			return err
+		}
 	}
 
 	box := []string{
@@ -175,16 +185,69 @@ func runKeygen(svc app.Service, cfg config.Config, args []string, opts runOption
 		"║                  🔑 DPX Key Generated Successfully               ║",
 		"╠══════════════════════════════════════════════════════════════════╣",
 		"║ Backend: age                                                     ║",
-		fmt.Sprintf("║ Key file: %-52s║", padRight(expandHome(*outPath), 52)),
+		fmt.Sprintf("║ Key file: %-52s║", padRight(keyPath, 52)),
 		"╠══════════════════════════════════════════════════════════════════╣",
-		"║ Public Key (add to .dpx.yaml):                                   ║",
+		"║ Public Key:                                                       ║",
 		fmt.Sprintf("║   %-63s║", truncate(identity.PublicKey, 63)),
 		"╚══════════════════════════════════════════════════════════════════╝",
 	}
 	for _, line := range box {
 		fmt.Fprintln(opts.stdout, line)
 	}
+	if !*noConfigUpdate {
+		fmt.Fprintf(opts.stdout, "✅ Updated config: %s\n", syncResult.Path)
+		if syncResult.RecipientAdded {
+			fmt.Fprintln(opts.stdout, "✅ Added public key to age.recipients")
+		} else {
+			fmt.Fprintln(opts.stdout, "ℹ️ Public key already exists in age.recipients")
+		}
+		if syncResult.LegacyMigrated {
+			fmt.Fprintln(opts.stdout, "ℹ️ Legacy .dopx.yaml detected, settings written to .dpx.yaml")
+		}
+	}
 	return nil
+}
+
+type keygenConfigSyncResult struct {
+	Path           string
+	RecipientAdded bool
+	LegacyMigrated bool
+}
+
+func syncKeygenConfig(cwd, keyFilePath, publicKey string) (keygenConfigSyncResult, error) {
+	source, err := resolveConfigSource(cwd)
+	if err != nil {
+		return keygenConfigSyncResult{}, err
+	}
+
+	targetPath := filepath.Join(cwd, primaryConfig)
+	cfg := config.Default()
+	result := keygenConfigSyncResult{Path: targetPath}
+
+	if source.Exists {
+		loaded, err := config.Load(source.Path)
+		if err != nil {
+			return keygenConfigSyncResult{}, err
+		}
+		cfg = loaded
+		if !source.Legacy {
+			targetPath = source.Path
+			result.Path = targetPath
+		} else {
+			result.LegacyMigrated = true
+		}
+	}
+
+	cfg.KeyFile = keyFilePath
+	if !containsString(cfg.Age.Recipients, publicKey) {
+		cfg.Age.Recipients = append(cfg.Age.Recipients, publicKey)
+		result.RecipientAdded = true
+	}
+
+	if err := config.Save(targetPath, cfg); err != nil {
+		return keygenConfigSyncResult{}, err
+	}
+	return result, nil
 }
 
 func runEncrypt(svc app.Service, cfg config.Config, args []string, opts runOptions) error {
@@ -597,6 +660,15 @@ func splitCSV(text string) []string {
 		}
 	}
 	return out
+}
+
+func containsString(items []string, value string) bool {
+	for _, item := range items {
+		if item == value {
+			return true
+		}
+	}
+	return false
 }
 
 type encryptArgs struct {
