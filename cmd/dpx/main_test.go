@@ -418,6 +418,95 @@ func TestRunKeygenImportsFromStdin(t *testing.T) {
 	}
 }
 
+func TestRunTUIImportsKeyFromFile(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	identity, err := agex.GenerateIdentity()
+	if err != nil {
+		t.Fatalf("generate identity: %v", err)
+	}
+	importRaw := strings.Join([]string{
+		"# created: 2026-03-17T11:47:02Z",
+		"# public key: " + identity.PublicKey,
+		identity.PrivateKey,
+		"",
+	}, "\n")
+	importPath := filepath.Join(dir, "source-age-keys.txt")
+	if err := os.WriteFile(importPath, []byte(importRaw), 0o600); err != nil {
+		t.Fatalf("write import file: %v", err)
+	}
+	outPath := filepath.Join(dir, "imported-age-keys.txt")
+
+	input := strings.NewReader("5\n1\n" + importPath + "\n" + outPath + "\n")
+	stdout := new(bytes.Buffer)
+	if err := run([]string{"tui"}, runOptions{
+		cwd:    dir,
+		stdin:  input,
+		stdout: stdout,
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("run tui import: %v", err)
+	}
+
+	data, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("read imported key file: %v", err)
+	}
+	if !strings.Contains(string(data), identity.PrivateKey) {
+		t.Fatalf("expected imported private key in output file")
+	}
+	if !strings.Contains(stdout.String(), "Imported key ->") {
+		t.Fatalf("expected import output message, got %q", stdout.String())
+	}
+
+	cfg, err := config.Load(filepath.Join(dir, ".dpx.yaml"))
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if !containsString(cfg.Age.Recipients, identity.PublicKey) {
+		t.Fatalf("expected imported public key in config recipients, got %#v", cfg.Age.Recipients)
+	}
+}
+
+func TestRunTUIDoctorAction(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	cfg := `version: 1
+default_suffix: ".dpx"
+key_file: "` + filepath.Join(dir, "keys.txt") + `"
+age:
+  recipients:
+    - "age1testrecipient"
+`
+	if err := os.WriteFile(filepath.Join(dir, ".dpx.yaml"), []byte(cfg), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "keys.txt"), []byte("AGE-SECRET-KEY-TEST\n"), 0o600); err != nil {
+		t.Fatalf("write key file: %v", err)
+	}
+
+	input := strings.NewReader("6\n")
+	stdout := new(bytes.Buffer)
+	if err := run([]string{"tui"}, runOptions{
+		cwd:    dir,
+		stdin:  input,
+		stdout: stdout,
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("run tui doctor: %v", err)
+	}
+
+	got := stdout.String()
+	if !strings.Contains(got, "DPX Doctor") {
+		t.Fatalf("expected doctor output in tui, got %q", got)
+	}
+	if !strings.Contains(got, "Recipients: 1") {
+		t.Fatalf("expected recipient count in doctor output, got %q", got)
+	}
+}
+
 func TestRunPasswordEncryptDecryptCommands(t *testing.T) {
 	t.Parallel()
 
@@ -487,6 +576,103 @@ func TestRunEncDecAliases(t *testing.T) {
 	}
 	if !bytes.Equal(restored, plaintext) {
 		t.Fatalf("restored mismatch: got %q want %q", restored, plaintext)
+	}
+}
+
+func TestRunAutoPrefixCommandResolvesEncryptDecrypt(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, ".env")
+	plaintext := []byte("FOO=bar\nHELLO=world\n")
+	if err := os.WriteFile(sourcePath, plaintext, 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	if err := run([]string{"encr", sourcePath, "--password", "secret-123"}, runOptions{
+		cwd:    dir,
+		stdin:  strings.NewReader(""),
+		stdout: new(bytes.Buffer),
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("run encr prefix: %v", err)
+	}
+	if err := os.Remove(sourcePath); err != nil {
+		t.Fatalf("remove source: %v", err)
+	}
+
+	if err := run([]string{"decr", sourcePath + ".dpx", "--password", "secret-123"}, runOptions{
+		cwd:    dir,
+		stdin:  strings.NewReader(""),
+		stdout: new(bytes.Buffer),
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("run decr prefix: %v", err)
+	}
+
+	restored, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Fatalf("read restored: %v", err)
+	}
+	if !bytes.Equal(restored, plaintext) {
+		t.Fatalf("restored mismatch: got %q want %q", restored, plaintext)
+	}
+}
+
+func TestRunSingleLetterAliasesEncryptDecrypt(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, ".env")
+	plaintext := []byte("FOO=bar\nHELLO=world\n")
+	if err := os.WriteFile(sourcePath, plaintext, 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	if err := run([]string{"e", sourcePath, "--password", "secret-123"}, runOptions{
+		cwd:    dir,
+		stdin:  strings.NewReader(""),
+		stdout: new(bytes.Buffer),
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("run e alias: %v", err)
+	}
+	if err := os.Remove(sourcePath); err != nil {
+		t.Fatalf("remove source: %v", err)
+	}
+
+	if err := run([]string{"d", sourcePath + ".dpx", "--password", "secret-123"}, runOptions{
+		cwd:    dir,
+		stdin:  strings.NewReader(""),
+		stdout: new(bytes.Buffer),
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("run d alias: %v", err)
+	}
+
+	restored, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Fatalf("read restored: %v", err)
+	}
+	if !bytes.Equal(restored, plaintext) {
+		t.Fatalf("restored mismatch: got %q want %q", restored, plaintext)
+	}
+}
+
+func TestRunUnknownCommandHasSuggestion(t *testing.T) {
+	t.Parallel()
+
+	err := run([]string{"decpyt"}, runOptions{
+		cwd:    t.TempDir(),
+		stdin:  strings.NewReader(""),
+		stdout: new(bytes.Buffer),
+		stderr: new(bytes.Buffer),
+	})
+	if err == nil {
+		t.Fatalf("expected unknown command error")
+	}
+	if !strings.Contains(err.Error(), "did you mean") || !strings.Contains(err.Error(), "decrypt") {
+		t.Fatalf("expected suggestion for decrypt, got %v", err)
 	}
 }
 

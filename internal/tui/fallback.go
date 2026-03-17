@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/dwirx/dpx/internal/app"
@@ -16,7 +17,7 @@ func RunFallback(svc app.Service, cfg config.Config, cwd string, stdin io.Reader
 	reader := bufio.NewReader(stdin)
 	renderHeader(stdout)
 
-	action, err := chooseString(reader, stdout, "Choose an action", []string{"Encrypt", "Decrypt", "Inspect", "Auto"})
+	action, err := chooseString(reader, stdout, "Choose an action", []string{"Encrypt", "Decrypt", "Inspect", "Auto", "Import Key", "Doctor"})
 	if err != nil {
 		return err
 	}
@@ -201,6 +202,49 @@ func RunFallback(svc app.Service, cfg config.Config, cwd string, stdin io.Reader
 		}
 		fmt.Fprintf(stdout, "Encrypted %s -> %s\n", req.InputPath, outputPath)
 		return nil
+	case "Import Key":
+		source, err := chooseString(reader, stdout, "Import source", []string{"From file", "Paste key block"})
+		if err != nil {
+			return err
+		}
+		raw := ""
+		if source == "From file" {
+			path, err := prompt(reader, stdout, "Path to age key file: ")
+			if err != nil {
+				return err
+			}
+			path = strings.TrimSpace(path)
+			if path == "" {
+				return fmt.Errorf("import file path is required")
+			}
+			data, err := os.ReadFile(expandHome(path))
+			if err != nil {
+				return err
+			}
+			raw = string(data)
+		} else {
+			raw, err = promptMultiline(reader, stdout, "Paste key block", "END")
+			if err != nil {
+				return err
+			}
+		}
+		out, err := prompt(reader, stdout, fmt.Sprintf("Output key path [%s]: ", cfg.KeyFile))
+		if err != nil {
+			return err
+		}
+		message, err := importIdentityAndSyncConfig(svc, cwd, cfg, strings.TrimSpace(out), raw)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(stdout, message)
+		return nil
+	case "Doctor":
+		report, err := collectDoctorReportForTUI(svc, cwd, cfg)
+		if err != nil {
+			return err
+		}
+		fmt.Fprint(stdout, formatDoctorReport(report))
+		return nil
 	default:
 		return fmt.Errorf("unsupported action %q", action)
 	}
@@ -209,7 +253,7 @@ func RunFallback(svc app.Service, cfg config.Config, cwd string, stdin io.Reader
 func renderHeader(w io.Writer) {
 	fmt.Fprintln(w, "╭──────────────────────────────────────────────────────────────╮")
 	fmt.Fprintln(w, "│ DPX TUI                                                      │")
-	fmt.Fprintln(w, "│ Full-screen secrets workflow for encrypt, decrypt, inspect   │")
+	fmt.Fprintln(w, "│ Encrypt/decrypt/inspect/import/doctor workflow               │")
 	fmt.Fprintln(w, "╰──────────────────────────────────────────────────────────────╯")
 }
 
@@ -259,4 +303,24 @@ func prompt(reader *bufio.Reader, stdout io.Writer, label string) (string, error
 		return "", err
 	}
 	return strings.TrimSpace(text), nil
+}
+
+func promptMultiline(reader *bufio.Reader, stdout io.Writer, label, terminator string) (string, error) {
+	fmt.Fprintf(stdout, "%s (finish with %s on a new line):\n", label, terminator)
+	lines := make([]string, 0, 8)
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil && err != io.EOF {
+			return "", err
+		}
+		trimmed := strings.TrimRight(line, "\r\n")
+		if trimmed == terminator {
+			break
+		}
+		lines = append(lines, trimmed)
+		if err == io.EOF {
+			break
+		}
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n")), nil
 }

@@ -1,6 +1,6 @@
 module github.com/dwirx/dpx
 
-go 1.25.5
+go 1.25.8
 
 require (
 	filippo.io/age v1.3.1

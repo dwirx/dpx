@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"golang.org/x/term"
@@ -89,7 +90,22 @@ func run(args []string, opts runOptions) error {
 		printUsage(opts.stdout)
 		return nil
 	}
-	switch args[0] {
+
+	command, err := resolveCommand(args[0])
+	if err != nil {
+		if isDirectFileInvocation(args[0], opts.cwd) {
+			cfg, _, cfgErr := loadConfig(opts.cwd)
+			if cfgErr != nil {
+				return cfgErr
+			}
+			svc := app.New(cfg)
+			return runDirectPathInvocation(svc, cfg, args, opts)
+		}
+		return err
+	}
+	args[0] = command
+
+	switch command {
 	case "version", "--version", "-v":
 		printVersion(opts.stdout)
 		return nil
@@ -108,12 +124,12 @@ func run(args []string, opts runOptions) error {
 	}
 	svc := app.New(cfg)
 
-	switch args[0] {
+	switch command {
 	case "keygen":
 		return runKeygen(svc, cfg, args[1:], opts)
-	case "encrypt", "enc":
+	case "encrypt":
 		return runEncrypt(svc, cfg, args[1:], opts)
-	case "decrypt", "dec":
+	case "decrypt":
 		return runDecrypt(svc, args[1:], opts)
 	case "inspect":
 		return runInspect(svc, args[1:], opts)
@@ -586,6 +602,125 @@ func loadConfig(cwd string) (config.Config, configSource, error) {
 	return config.Default(), source, nil
 }
 
+var commandAliases = map[string]string{
+	"init":      "init",
+	"doctor":    "doctor",
+	"keygen":    "keygen",
+	"encrypt":   "encrypt",
+	"enc":       "encrypt",
+	"e":         "encrypt",
+	"decrypt":   "decrypt",
+	"dec":       "decrypt",
+	"d":         "decrypt",
+	"inspect":   "inspect",
+	"tui":       "tui",
+	"version":   "version",
+	"--version": "version",
+	"-v":        "version",
+	"help":      "help",
+	"--help":    "help",
+	"-h":        "help",
+}
+
+func resolveCommand(input string) (string, error) {
+	if canonical, ok := commandAliases[input]; ok {
+		return canonical, nil
+	}
+
+	matches := make(map[string]struct{})
+	for alias, canonical := range commandAliases {
+		if strings.HasPrefix(alias, input) {
+			matches[canonical] = struct{}{}
+		}
+	}
+	if len(matches) == 1 {
+		for canonical := range matches {
+			return canonical, nil
+		}
+	}
+	if len(matches) > 1 {
+		candidates := make([]string, 0, len(matches))
+		for canonical := range matches {
+			candidates = append(candidates, canonical)
+		}
+		sort.Strings(candidates)
+		return "", fmt.Errorf("ambiguous command %q, candidates: %s", input, strings.Join(candidates, ", "))
+	}
+
+	suggestion := suggestCommand(input)
+	if suggestion != "" {
+		return "", fmt.Errorf("unknown command %q, did you mean %q?", input, suggestion)
+	}
+	return "", fmt.Errorf("unknown command %q", input)
+}
+
+func suggestCommand(input string) string {
+	if strings.TrimSpace(input) == "" {
+		return ""
+	}
+	candidates := []string{"init", "doctor", "keygen", "encrypt", "decrypt", "inspect", "tui", "version", "help"}
+	best := ""
+	bestDistance := 99
+	for _, candidate := range candidates {
+		distance := levenshtein(input, candidate)
+		if distance < bestDistance {
+			bestDistance = distance
+			best = candidate
+		}
+	}
+	if bestDistance <= 3 {
+		return best
+	}
+	return ""
+}
+
+func levenshtein(a, b string) int {
+	if a == b {
+		return 0
+	}
+	if len(a) == 0 {
+		return len(b)
+	}
+	if len(b) == 0 {
+		return len(a)
+	}
+
+	prev := make([]int, len(b)+1)
+	curr := make([]int, len(b)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+
+	for i := 1; i <= len(a); i++ {
+		curr[0] = i
+		for j := 1; j <= len(b); j++ {
+			cost := 0
+			if a[i-1] != b[j-1] {
+				cost = 1
+			}
+			curr[j] = minInt(
+				curr[j-1]+1,
+				prev[j]+1,
+				prev[j-1]+cost,
+			)
+		}
+		copy(prev, curr)
+	}
+
+	return prev[len(b)]
+}
+
+func minInt(a, b, c int) int {
+	min := a
+	if b < min {
+		min = b
+	}
+	if c < min {
+		min = c
+	}
+	return min
+}
+
 func printVersion(w io.Writer) {
 	fmt.Fprintf(w, "%s %s\n", appName, version)
 }
@@ -826,6 +961,10 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "Quick mode:")
 	fmt.Fprintln(w, "  dpx .env                  # encrypt")
 	fmt.Fprintln(w, "  dpx .env.dpx              # decrypt")
+	fmt.Fprintln(w, "  dpx e .env                # short alias for encrypt")
+	fmt.Fprintln(w, "  dpx d .env.dpx            # short alias for decrypt")
+	fmt.Fprintln(w, "  dpx encr .env             # prefix command (auto-resolve to encrypt)")
+	fmt.Fprintln(w, "  dpx decr .env.dpx         # prefix command (auto-resolve to decrypt)")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Commands:")
 	fmt.Fprintln(w, "  init")
@@ -836,6 +975,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  tui")
 	fmt.Fprintln(w, "  doctor")
 	fmt.Fprintln(w, "  version")
+	fmt.Fprintln(w, "  help")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Flags:")
 	fmt.Fprintln(w, "  --version, -v")

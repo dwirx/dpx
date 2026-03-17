@@ -36,6 +36,10 @@ const (
 	stageDecryptOutput
 	stageInspectFile
 	stageInspectManualPath
+	stageImportSource
+	stageImportFilePath
+	stageImportRaw
+	stageImportOutput
 	stageResult
 )
 
@@ -59,6 +63,7 @@ type Model struct {
 	encryptReq  app.EncryptRequest
 	decryptReq  app.DecryptRequest
 	decryptMeta envelope.Metadata
+	importRaw   string
 }
 
 func Run(svc app.Service, cfg config.Config, cwd string, stdin io.Reader, stdout io.Writer) error {
@@ -83,7 +88,7 @@ func NewModel(svc app.Service, cfg config.Config, cwd string, stdin io.Reader, s
 		interactive = true
 	}
 	m := Model{svc: svc, cfg: cfg, cwd: cwd, stdin: stdin, stdout: stdout, interactive: interactive}
-	m.setMenu(stageAction, "Choose an action", []string{"Encrypt", "Decrypt", "Inspect", "Auto"})
+	m.setMenu(stageAction, "Choose an action", []string{"Encrypt", "Decrypt", "Inspect", "Auto", "Import Key", "Doctor"})
 	return m, nil
 }
 
@@ -119,7 +124,7 @@ func (m Model) View() string {
 	var body strings.Builder
 	body.WriteString(titleStyle.Render("DPX TUI"))
 	body.WriteString("\n")
-	body.WriteString(helpStyle.Render("Full-screen secrets workflow for encrypt, decrypt, and inspect"))
+	body.WriteString(helpStyle.Render("Full-screen workflow for encrypt, decrypt, inspect, import, and doctor"))
 	body.WriteString("\n\n")
 	body.WriteString(subtitleStyle.Render(m.title))
 	body.WriteString("\n\n")
@@ -157,7 +162,10 @@ func (m Model) isInputStage() bool {
 		stageDecryptManualPath,
 		stageDecryptPassword,
 		stageDecryptOutput,
-		stageInspectManualPath:
+		stageInspectManualPath,
+		stageImportFilePath,
+		stageImportRaw,
+		stageImportOutput:
 		return true
 	default:
 		return false
@@ -240,6 +248,20 @@ func (m Model) submitSelection() (tea.Model, tea.Cmd) {
 		case "Auto":
 			m.setInput(stageAutoPath, "File path (.env or .dpx)", "", false)
 			return m, nil
+		case "Import Key":
+			m.setMenu(stageImportSource, "Import source", []string{"From file", "Paste private key"})
+		case "Doctor":
+			report, err := collectDoctorReportForTUI(m.svc, m.cwd, m.cfg)
+			if err != nil {
+				return m.fail(err)
+			}
+			m.stage = stageResult
+			m.title = "Doctor Result"
+			m.help = "Press Enter or q to exit"
+			m.result = formatDoctorReport(report)
+			if !m.interactive {
+				return m, tea.Quit
+			}
 		}
 	case stageEncryptFile:
 		m.encryptReq = app.EncryptRequest{InputPath: selected}
@@ -261,6 +283,12 @@ func (m Model) submitSelection() (tea.Model, tea.Cmd) {
 		return m.startDecrypt(selected)
 	case stageInspectFile:
 		return m.showInspectResult(selected)
+	case stageImportSource:
+		if selected == "From file" {
+			m.setInput(stageImportFilePath, "Path to age key file", "", false)
+		} else {
+			m.setInput(stageImportRaw, "Private key (AGE-SECRET-KEY-...)", "", true)
+		}
 	}
 	return m, nil
 }
@@ -335,6 +363,36 @@ func (m Model) submitInput() (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m.showInspectResult(value)
+	case stageImportFilePath:
+		if value == "" {
+			m.help = "Import file path is required, q quits"
+			return m, nil
+		}
+		data, err := os.ReadFile(expandHome(value))
+		if err != nil {
+			return m.fail(err)
+		}
+		m.importRaw = string(data)
+		m.setInput(stageImportOutput, "Output key path", m.cfg.KeyFile, false)
+	case stageImportRaw:
+		if value == "" {
+			m.help = "Private key is required, q quits"
+			return m, nil
+		}
+		m.importRaw = value
+		m.setInput(stageImportOutput, "Output key path", m.cfg.KeyFile, false)
+	case stageImportOutput:
+		message, err := importIdentityAndSyncConfig(m.svc, m.cwd, m.cfg, value, m.importRaw)
+		if err != nil {
+			return m.fail(err)
+		}
+		m.stage = stageResult
+		m.title = "Import Result"
+		m.help = "Press Enter or q to exit"
+		m.result = message
+		if !m.interactive {
+			return m, tea.Quit
+		}
 	}
 	return m, nil
 }

@@ -2,6 +2,7 @@ package app_test
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -138,5 +139,87 @@ func TestDecryptRejectsTamperedMetadata(t *testing.T) {
 
 	if _, err := svc.DecryptFile(app.DecryptRequest{InputPath: encryptedPath, Passphrase: []byte("secret-123")}); err == nil {
 		t.Fatal("expected tampered metadata to fail decryption")
+	}
+}
+
+func TestDecryptRejectsUnsupportedKDFAlgorithm(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, ".env")
+	if err := os.WriteFile(sourcePath, []byte("FOO=bar\n"), 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	svc := app.New(config.Default())
+	encryptedPath, err := svc.EncryptFile(app.EncryptRequest{
+		InputPath:  sourcePath,
+		Mode:       envelope.ModePassword,
+		Passphrase: []byte("secret-123"),
+	})
+	if err != nil {
+		t.Fatalf("encrypt file: %v", err)
+	}
+
+	data, err := os.ReadFile(encryptedPath)
+	if err != nil {
+		t.Fatalf("read encrypted file: %v", err)
+	}
+	tampered := strings.Replace(string(data), "KDF-Algorithm: argon2id", "KDF-Algorithm: scrypt", 1)
+	if err := os.WriteFile(encryptedPath, []byte(tampered), 0o600); err != nil {
+		t.Fatalf("write tampered file: %v", err)
+	}
+
+	_, err = svc.DecryptFile(app.DecryptRequest{InputPath: encryptedPath, Passphrase: []byte("secret-123")})
+	if err == nil {
+		t.Fatal("expected unsupported kdf algorithm to fail decryption")
+	}
+	if !strings.Contains(err.Error(), "unsupported kdf algorithm") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestDecryptRejectsInvalidKDFParallelism(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, ".env")
+	if err := os.WriteFile(sourcePath, []byte("FOO=bar\n"), 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	svc := app.New(config.Default())
+	encryptedPath, err := svc.EncryptFile(app.EncryptRequest{
+		InputPath:  sourcePath,
+		Mode:       envelope.ModePassword,
+		Passphrase: []byte("secret-123"),
+	})
+	if err != nil {
+		t.Fatalf("encrypt file: %v", err)
+	}
+
+	data, err := os.ReadFile(encryptedPath)
+	if err != nil {
+		t.Fatalf("read encrypted file: %v", err)
+	}
+	meta, _, err := envelope.Unmarshal(data)
+	if err != nil {
+		t.Fatalf("unmarshal encrypted file: %v", err)
+	}
+	originalLine := fmt.Sprintf("KDF-Parallelism: %d", meta.KDF.Parallelism)
+	tampered := strings.Replace(string(data), originalLine, "KDF-Parallelism: 0", 1)
+	if strings.Contains(tampered, originalLine) {
+		t.Fatalf("failed to tamper KDF parallelism in payload")
+	}
+	if err := os.WriteFile(encryptedPath, []byte(tampered), 0o600); err != nil {
+		t.Fatalf("write tampered file: %v", err)
+	}
+
+	_, err = svc.DecryptFile(app.DecryptRequest{InputPath: encryptedPath, Passphrase: []byte("secret-123")})
+	if err == nil {
+		t.Fatal("expected invalid parallelism to fail decryption")
+	}
+	if !strings.Contains(err.Error(), "parallelism") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }

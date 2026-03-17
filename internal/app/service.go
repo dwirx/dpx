@@ -200,22 +200,25 @@ func (s Service) DecryptFile(req DecryptRequest) (string, error) {
 		if meta.KDF == nil {
 			return "", fmt.Errorf("password metadata missing")
 		}
+		if meta.KDF.Algorithm != "argon2id" {
+			return "", fmt.Errorf("unsupported kdf algorithm %q", meta.KDF.Algorithm)
+		}
 		salt, err := base64.StdEncoding.DecodeString(meta.KDF.SaltBase64)
 		if err != nil {
 			return "", fmt.Errorf("decode salt: %w", err)
 		}
-		if len(payload) < 24 {
+		if len(payload) < password.NonceSize {
 			return "", fmt.Errorf("malformed password payload")
 		}
 		params := password.Params{
 			Salt:        salt,
-			Nonce:       append([]byte{}, payload[:24]...),
+			Nonce:       append([]byte{}, payload[:password.NonceSize]...),
 			MemoryKiB:   meta.KDF.MemoryKiB,
 			Iterations:  meta.KDF.Iterations,
 			Parallelism: meta.KDF.Parallelism,
-			KeyLength:   32,
+			KeyLength:   password.KeySize,
 		}
-		protected, err = password.Decrypt(payload[24:], req.Passphrase, params)
+		protected, err = password.Decrypt(payload[password.NonceSize:], req.Passphrase, params)
 		if err != nil {
 			return "", err
 		}
