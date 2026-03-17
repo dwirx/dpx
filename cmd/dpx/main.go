@@ -18,6 +18,7 @@ import (
 	"github.com/dwirx/dpx/internal/crypto/agex"
 	"github.com/dwirx/dpx/internal/discovery"
 	"github.com/dwirx/dpx/internal/envelope"
+	"github.com/dwirx/dpx/internal/safeio"
 	"github.com/dwirx/dpx/internal/tui"
 )
 
@@ -116,6 +117,8 @@ func run(args []string, opts runOptions) error {
 		return runInit(opts)
 	case "doctor":
 		return runDoctor(opts)
+	case "uninstall":
+		return runUninstall(args[1:], opts)
 	}
 
 	cfg, _, err := loadConfig(opts.cwd)
@@ -172,6 +175,173 @@ func runDoctor(opts runOptions) error {
 	}
 	printDoctorReport(opts.stdout, report)
 	return nil
+}
+
+type uninstallArgs struct {
+	yes             bool
+	removeKey       bool
+	removeEncrypted bool
+}
+
+func parseUninstallArgs(args []string, opts runOptions) (uninstallArgs, error) {
+	fs := flag.NewFlagSet("uninstall", flag.ContinueOnError)
+	fs.SetOutput(opts.stderr)
+	yes := fs.Bool("yes", false, "skip confirmation prompt")
+	removeKey := fs.Bool("remove-key", false, "remove key file from config")
+	removeEncrypted := fs.Bool("remove-encrypted", false, "remove .dpx files in current directory")
+	if err := fs.Parse(args); err != nil {
+		return uninstallArgs{}, err
+	}
+	if fs.NArg() > 0 {
+		return uninstallArgs{}, fmt.Errorf("unexpected argument %q", fs.Arg(0))
+	}
+	return uninstallArgs{
+		yes:             *yes,
+		removeKey:       *removeKey,
+		removeEncrypted: *removeEncrypted,
+	}, nil
+}
+
+func runUninstall(args []string, opts runOptions) error {
+	parsed, err := parseUninstallArgs(args, opts)
+	if err != nil {
+		return err
+	}
+
+	source, err := resolveConfigSource(opts.cwd)
+	if err != nil {
+		return err
+	}
+	cfg := config.Default()
+	if source.Exists {
+		cfg, err = config.Load(source.Path)
+		if err != nil {
+			return err
+		}
+	}
+
+	pathsToRemove := make([]string, 0, 8)
+	if source.Exists {
+		pathsToRemove = append(pathsToRemove, source.Path)
+	}
+
+	keyPath := expandHome(cfg.KeyFile)
+	if parsed.removeKey {
+		if !canRemoveKeyPath(opts.cwd, keyPath) {
+			return fmt.Errorf("refusing to remove key file outside safe scope: %s", keyPath)
+		}
+		pathsToRemove = append(pathsToRemove, keyPath)
+	}
+
+	if parsed.removeEncrypted {
+		files, err := findEncryptedFiles(opts.cwd)
+		if err != nil {
+			return err
+		}
+		pathsToRemove = append(pathsToRemove, files...)
+	}
+
+	if len(pathsToRemove) == 0 {
+		fmt.Fprintln(opts.stdout, "Nothing to uninstall in current directory.")
+		return nil
+	}
+	if err := validateRemovalTargets(pathsToRemove); err != nil {
+		return err
+	}
+
+	if !parsed.yes {
+		fmt.Fprintln(opts.stdout, "Uninstall plan:")
+		for _, path := range pathsToRemove {
+			fmt.Fprintf(opts.stdout, "  - %s\n", path)
+		}
+		fmt.Fprintln(opts.stdout, `Type "YES" to confirm uninstall.`)
+		answer, err := prompt(opts, "Confirm: ")
+		if err != nil {
+			return err
+		}
+		if answer != "YES" {
+			return fmt.Errorf("uninstall canceled")
+		}
+	}
+
+	removed := make([]string, 0, len(pathsToRemove))
+	for _, path := range pathsToRemove {
+		ok, err := removeFileIfExists(path)
+		if err != nil {
+			return err
+		}
+		if ok {
+			removed = append(removed, path)
+		}
+	}
+
+	fmt.Fprintf(opts.stdout, "Uninstall completed. Removed %d file(s).\n", len(removed))
+	for _, path := range removed {
+		fmt.Fprintf(opts.stdout, "  - %s\n", path)
+	}
+	return nil
+}
+
+func removeFileIfExists(path string) (bool, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	if info.IsDir() {
+		return false, fmt.Errorf("refusing to remove directory: %s", path)
+	}
+	if err := os.Remove(path); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func validateRemovalTargets(paths []string) error {
+	for _, path := range paths {
+		info, err := os.Stat(path)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return err
+		}
+		if info.IsDir() {
+			return fmt.Errorf("refusing to remove directory: %s", path)
+		}
+	}
+	return nil
+}
+
+func canRemoveKeyPath(cwd, keyPath string) bool {
+	cleaned := filepath.Clean(keyPath)
+	defaultPath := filepath.Clean(expandHome(config.DefaultKeyFile))
+	legacyPath := filepath.Clean(expandHome(config.LegacyKeyFile))
+	if cleaned == defaultPath || cleaned == legacyPath {
+		return true
+	}
+	return isPathWithin(cwd, cleaned)
+}
+
+func isPathWithin(baseDir, targetPath string) bool {
+	baseAbs, err := filepath.Abs(baseDir)
+	if err != nil {
+		return false
+	}
+	targetAbs, err := filepath.Abs(targetPath)
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(baseAbs, targetAbs)
+	if err != nil {
+		return false
+	}
+	if rel == "." {
+		return true
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
 }
 
 func runKeygen(svc app.Service, cfg config.Config, args []string, opts runOptions) error {
@@ -330,15 +500,11 @@ func runEncrypt(svc app.Service, cfg config.Config, args []string, opts runOptio
 
 	filePath := parsed.filePath
 	if filePath == "" {
-		candidates, err := svc.Discover(opts.cwd)
+		selectedPath, err := chooseEncryptPath(opts, svc, opts.cwd)
 		if err != nil {
 			return err
 		}
-		candidate, err := chooseCandidate(opts, "Select a file to encrypt", candidates)
-		if err != nil {
-			return err
-		}
-		filePath = candidate.Path
+		filePath = selectedPath
 	}
 
 	recipients := splitCSV(parsed.recipientsText)
@@ -441,8 +607,12 @@ func runInspect(svc app.Service, args []string, opts runOptions) error {
 func runTUI(svc app.Service, cfg config.Config, opts runOptions) error {
 	inFile, inTTY := opts.stdin.(*os.File)
 	outFile, outTTY := opts.stdout.(*os.File)
-	if inTTY && outTTY && term.IsTerminal(int(inFile.Fd())) && term.IsTerminal(int(outFile.Fd())) {
-		return tui.Run(svc, cfg, opts.cwd, opts.stdin, opts.stdout)
+	if inTTY && outTTY {
+		inFD, inOK := fileDescriptorInt(inFile)
+		outFD, outOK := fileDescriptorInt(outFile)
+		if inOK && outOK && term.IsTerminal(inFD) && term.IsTerminal(outFD) {
+			return tui.Run(svc, cfg, opts.cwd, opts.stdin, opts.stdout)
+		}
 	}
 	return tui.RunFallback(svc, cfg, opts.cwd, opts.stdin, opts.stdout)
 }
@@ -495,7 +665,7 @@ func fileExists(path string) bool {
 	if path == "" {
 		return false
 	}
-	_, err := os.Stat(path)
+	_, err := safeio.Stat(path)
 	return err == nil
 }
 
@@ -515,22 +685,142 @@ func chooseMode(passwordText string, useAge bool, recipients []string, cfg confi
 	return envelope.ModePassword
 }
 
-func chooseCandidate(opts runOptions, title string, candidates []discovery.Candidate) (discovery.Candidate, error) {
-	if len(candidates) == 0 {
-		return discovery.Candidate{}, fmt.Errorf("no candidate files found")
+const manualEncryptPathOption = "[manual] Enter custom file path"
+const searchEncryptPathOption = "[search] Find file by keyword"
+
+type encryptScope string
+
+const (
+	encryptScopeAny encryptScope = "any"
+	encryptScopeEnv encryptScope = "env"
+)
+
+func chooseEncryptPath(opts runOptions, svc app.Service, cwd string) (string, error) {
+	scope := encryptScopeAny
+	for {
+		candidates, err := discoverEncryptCandidatesByScope(svc, cwd, scope)
+		if err != nil {
+			return "", err
+		}
+		choice, err := chooseCandidatePathWithScope(opts, encryptScopeTitle(scope), candidates, scope)
+		if err != nil {
+			return "", err
+		}
+		switch choice {
+		case encryptScopeSwitchOption(scope):
+			scope = toggleEncryptScope(scope)
+			continue
+		case searchEncryptPathOption:
+			if len(candidates) == 0 {
+				fmt.Fprintln(opts.stdout, "No files available to search in this mode.")
+				continue
+			}
+			query, err := prompt(opts, "Search keyword: ")
+			if err != nil {
+				return "", err
+			}
+			query = strings.TrimSpace(query)
+			if query == "" {
+				continue
+			}
+			filtered := filterCandidatesByQuery(candidates, query)
+			if len(filtered) == 0 {
+				fmt.Fprintf(opts.stdout, "No files match %q in %s mode.\n", query, encryptScopeName(scope))
+				continue
+			}
+			if len(filtered) == 1 {
+				return filtered[0].Path, nil
+			}
+			picked, err := chooseString(opts, fmt.Sprintf("Search results for %q", query), append(candidatePaths(filtered), "[back] Back"))
+			if err != nil {
+				return "", err
+			}
+			if picked == "[back] Back" {
+				continue
+			}
+			return picked, nil
+		case manualEncryptPathOption:
+			path, err := prompt(opts, "File to encrypt: ")
+			if err != nil {
+				return "", err
+			}
+			path = strings.TrimSpace(path)
+			if path == "" {
+				return "", fmt.Errorf("file path is required")
+			}
+			return path, nil
+		default:
+			return choice, nil
+		}
 	}
+}
+
+func chooseCandidatePathWithScope(opts runOptions, title string, candidates []discovery.Candidate, scope encryptScope) (string, error) {
+	labels := candidatePaths(candidates)
+	labels = append(labels, manualEncryptPathOption)
+	if len(candidates) > 0 {
+		labels = append(labels, searchEncryptPathOption)
+	}
+	labels = append(labels, encryptScopeSwitchOption(scope))
+	return chooseString(opts, title, labels)
+}
+
+func discoverEncryptCandidatesByScope(svc app.Service, cwd string, scope encryptScope) ([]discovery.Candidate, error) {
+	switch scope {
+	case encryptScopeEnv:
+		return svc.Discover(cwd)
+	default:
+		return svc.DiscoverEncryptTargets(cwd)
+	}
+}
+
+func candidatePaths(candidates []discovery.Candidate) []string {
 	labels := make([]string, 0, len(candidates))
-	byLabel := make(map[string]discovery.Candidate, len(candidates))
 	for _, candidate := range candidates {
-		label := candidate.Path
-		labels = append(labels, label)
-		byLabel[label] = candidate
+		labels = append(labels, candidate.Path)
 	}
-	choice, err := chooseString(opts, title, labels)
-	if err != nil {
-		return discovery.Candidate{}, err
+	return labels
+}
+
+func filterCandidatesByQuery(candidates []discovery.Candidate, query string) []discovery.Candidate {
+	lower := strings.ToLower(query)
+	filtered := make([]discovery.Candidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		base := strings.ToLower(filepath.Base(candidate.Path))
+		path := strings.ToLower(candidate.Path)
+		if strings.Contains(base, lower) || strings.Contains(path, lower) {
+			filtered = append(filtered, candidate)
+		}
 	}
-	return byLabel[choice], nil
+	return filtered
+}
+
+func toggleEncryptScope(scope encryptScope) encryptScope {
+	if scope == encryptScopeEnv {
+		return encryptScopeAny
+	}
+	return encryptScopeEnv
+}
+
+func encryptScopeSwitchOption(scope encryptScope) string {
+	if scope == encryptScopeEnv {
+		return "[scope] Switch to all files mode"
+	}
+	return "[scope] Switch to .env mode"
+}
+
+func encryptScopeTitle(scope encryptScope) string {
+	if scope == encryptScopeEnv {
+		return "Select a file to encrypt (.env mode)"
+	}
+	return "Select a file to encrypt (all files mode)"
+}
+
+func encryptScopeName(scope encryptScope) string {
+	if scope == encryptScopeEnv {
+		return ".env"
+	}
+	return "all files"
 }
 
 func chooseString(opts runOptions, title string, options []string) (string, error) {
@@ -568,14 +858,16 @@ func prompt(opts runOptions, label string) (string, error) {
 }
 
 func promptSecret(opts runOptions, label string) (string, error) {
-	if file, ok := opts.stdin.(*os.File); ok && term.IsTerminal(int(file.Fd())) {
-		fmt.Fprint(opts.stdout, label)
-		secret, err := term.ReadPassword(int(file.Fd()))
-		fmt.Fprintln(opts.stdout)
-		if err != nil {
-			return "", err
+	if file, ok := opts.stdin.(*os.File); ok {
+		if fd, fdOK := fileDescriptorInt(file); fdOK && term.IsTerminal(fd) {
+			fmt.Fprint(opts.stdout, label)
+			secret, err := term.ReadPassword(fd)
+			fmt.Fprintln(opts.stdout)
+			if err != nil {
+				return "", err
+			}
+			return strings.TrimSpace(string(secret)), nil
 		}
-		return strings.TrimSpace(string(secret)), nil
 	}
 	return prompt(opts, label)
 }
@@ -605,6 +897,7 @@ func loadConfig(cwd string) (config.Config, configSource, error) {
 var commandAliases = map[string]string{
 	"init":      "init",
 	"doctor":    "doctor",
+	"uninstall": "uninstall",
 	"keygen":    "keygen",
 	"encrypt":   "encrypt",
 	"enc":       "encrypt",
@@ -658,7 +951,7 @@ func suggestCommand(input string) string {
 	if strings.TrimSpace(input) == "" {
 		return ""
 	}
-	candidates := []string{"init", "doctor", "keygen", "encrypt", "decrypt", "inspect", "tui", "version", "help"}
+	candidates := []string{"init", "doctor", "uninstall", "keygen", "encrypt", "decrypt", "inspect", "tui", "version", "help"}
 	best := ""
 	bestDistance := 99
 	for _, candidate := range candidates {
@@ -960,11 +1253,13 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Quick mode:")
 	fmt.Fprintln(w, "  dpx .env                  # encrypt")
+	fmt.Fprintln(w, "  dpx notes.txt             # encrypt any file")
 	fmt.Fprintln(w, "  dpx .env.dpx              # decrypt")
 	fmt.Fprintln(w, "  dpx e .env                # short alias for encrypt")
 	fmt.Fprintln(w, "  dpx d .env.dpx            # short alias for decrypt")
 	fmt.Fprintln(w, "  dpx encr .env             # prefix command (auto-resolve to encrypt)")
 	fmt.Fprintln(w, "  dpx decr .env.dpx         # prefix command (auto-resolve to decrypt)")
+	fmt.Fprintln(w, "  dpx uninstall --yes --remove-key --remove-encrypted")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Commands:")
 	fmt.Fprintln(w, "  init")
@@ -974,21 +1269,27 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  inspect")
 	fmt.Fprintln(w, "  tui")
 	fmt.Fprintln(w, "  doctor")
+	fmt.Fprintln(w, "  uninstall")
 	fmt.Fprintln(w, "  version")
 	fmt.Fprintln(w, "  help")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Flags:")
 	fmt.Fprintln(w, "  --version, -v")
+	fmt.Fprintln(w, "  uninstall: --yes --remove-key --remove-encrypted")
 }
 
 func expandHome(path string) string {
-	if strings.HasPrefix(path, "~/") {
-		home, err := os.UserHomeDir()
-		if err == nil {
-			return filepath.Join(home, path[2:])
-		}
+	rest, ok := trimHomePrefix(path)
+	if !ok {
+		return path
 	}
-	return path
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return path
+	}
+	rest = strings.ReplaceAll(rest, "\\", string(os.PathSeparator))
+	rest = strings.ReplaceAll(rest, "/", string(os.PathSeparator))
+	return filepath.Join(home, rest)
 }
 
 func padRight(text string, width int) string {
@@ -1014,4 +1315,24 @@ func mustGetwd() string {
 		panic(err)
 	}
 	return wd
+}
+
+func fileDescriptorInt(file *os.File) (int, bool) {
+	fd := file.Fd()
+	maxInt := ^uintptr(0) >> 1
+	if fd > maxInt {
+		return 0, false
+	}
+	return int(fd), true
+}
+
+func trimHomePrefix(path string) (string, bool) {
+	switch {
+	case strings.HasPrefix(path, "~/"):
+		return path[2:], true
+	case strings.HasPrefix(path, "~\\"):
+		return path[2:], true
+	default:
+		return "", false
+	}
 }

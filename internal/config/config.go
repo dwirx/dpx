@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/dwirx/dpx/internal/safeio"
 	"gopkg.in/yaml.v3"
 )
 
@@ -40,7 +41,7 @@ func Default() Config {
 }
 
 func Save(path string, cfg Config) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 
@@ -54,7 +55,7 @@ func Save(path string, cfg Config) error {
 func Load(path string) (Config, error) {
 	cfg := Default()
 
-	data, err := os.ReadFile(path)
+	data, err := safeio.ReadFile(path)
 	if err != nil {
 		return cfg, err
 	}

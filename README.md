@@ -12,6 +12,7 @@ It supports two practical encryption modes:
 - Decrypt back to the original filename by default
 - CLI and interactive TUI modes
 - Smart file suggestions for `.env`, `.env.*`, `*.env`, `.secret*`, `.credentials*`
+- Safe `uninstall` command with confirmation and cleanup flags
 - `doctor` command to check config, key, and project readiness
 - Hidden password prompt on real terminals
 - Armored `.dpx` file format with metadata tamper detection
@@ -251,6 +252,26 @@ dpx doctor
 - number of suggested files
 - number of `.dpx` files in the current directory
 
+### Uninstall and cleanup
+
+Preview in help:
+
+```bash
+dpx --help
+```
+
+Remove project config only (asks confirmation):
+
+```bash
+dpx uninstall
+```
+
+Full cleanup without prompt:
+
+```bash
+dpx uninstall --yes --remove-key --remove-encrypted
+```
+
 ## CLI Reference
 
 ### `dpx init`
@@ -270,6 +291,16 @@ Default key path:
 ```text
 ~/.config/dpx/age-keys.txt
 ```
+
+### `dpx uninstall [--yes] [--remove-key] [--remove-encrypted]`
+
+Remove DPX files safely.
+
+Behavior:
+- removes `.dpx.yaml`/`.dopx.yaml` in current directory
+- `--remove-key` removes key file only if it is in a safe scope (default/legacy path or inside current project)
+- `--remove-encrypted` removes `.dpx` files in current directory
+- without `--yes`, command asks for explicit confirmation (`YES`)
 
 ### `dpx encrypt <file> [--password <text>] [--age] [--recipient <csv>] [--out <path>]`
 

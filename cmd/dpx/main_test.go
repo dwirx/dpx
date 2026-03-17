@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -74,8 +75,151 @@ func TestRunHelpListsVersionCommand(t *testing.T) {
 	if got := stdout.String(); !strings.Contains(got, "doctor") {
 		t.Fatalf("expected help to mention doctor command, got %q", got)
 	}
+	if got := stdout.String(); !strings.Contains(got, "uninstall") {
+		t.Fatalf("expected help to mention uninstall command, got %q", got)
+	}
+	if got := stdout.String(); !strings.Contains(got, "dpx uninstall --yes --remove-key --remove-encrypted") {
+		t.Fatalf("expected help to include uninstall usage example, got %q", got)
+	}
 	if got := stdout.String(); !strings.Contains(got, "dpx <command> [flags]") {
 		t.Fatalf("expected dpx branding in help, got %q", got)
+	}
+}
+
+func TestRunUninstallRemovesConfigKeyAndEncryptedFiles(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "age-keys.txt")
+	cfg := config.Default()
+	cfg.KeyFile = keyPath
+	if err := config.Save(filepath.Join(dir, ".dpx.yaml"), cfg); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := os.WriteFile(keyPath, []byte("AGE-SECRET-KEY-TEST\n"), 0o600); err != nil {
+		t.Fatalf("write key: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".env.dpx"), []byte("encrypted"), 0o600); err != nil {
+		t.Fatalf("write encrypted: %v", err)
+	}
+
+	stdout := new(bytes.Buffer)
+	if err := run([]string{"uninstall", "--yes", "--remove-key", "--remove-encrypted"}, runOptions{
+		cwd:    dir,
+		stdin:  strings.NewReader(""),
+		stdout: stdout,
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("run uninstall: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, ".dpx.yaml")); !os.IsNotExist(err) {
+		t.Fatalf("expected config removed, stat err=%v", err)
+	}
+	if _, err := os.Stat(keyPath); !os.IsNotExist(err) {
+		t.Fatalf("expected key removed, stat err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".env.dpx")); !os.IsNotExist(err) {
+		t.Fatalf("expected encrypted file removed, stat err=%v", err)
+	}
+	if !strings.Contains(stdout.String(), "Uninstall completed") {
+		t.Fatalf("expected uninstall success message, got %q", stdout.String())
+	}
+}
+
+func TestRunUninstallCancelsWithoutConfirmation(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.KeyFile = filepath.Join(dir, "age-keys.txt")
+	if err := config.Save(filepath.Join(dir, ".dpx.yaml"), cfg); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	err := run([]string{"uninstall"}, runOptions{
+		cwd:    dir,
+		stdin:  strings.NewReader("no\n"),
+		stdout: new(bytes.Buffer),
+		stderr: new(bytes.Buffer),
+	})
+	if err == nil {
+		t.Fatalf("expected uninstall cancel error")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "canceled") {
+		t.Fatalf("expected canceled error, got %v", err)
+	}
+
+	if _, statErr := os.Stat(filepath.Join(dir, ".dpx.yaml")); statErr != nil {
+		t.Fatalf("expected config to remain after cancel, stat err=%v", statErr)
+	}
+}
+
+func TestRunUninstallRejectsUnsafeCustomKeyPath(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	outsideDir := t.TempDir()
+	outsideKey := filepath.Join(outsideDir, "outside-age-keys.txt")
+	if err := os.WriteFile(outsideKey, []byte("AGE-SECRET-KEY-TEST\n"), 0o600); err != nil {
+		t.Fatalf("write outside key: %v", err)
+	}
+
+	cfg := config.Default()
+	cfg.KeyFile = outsideKey
+	if err := config.Save(filepath.Join(dir, ".dpx.yaml"), cfg); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	err := run([]string{"uninstall", "--yes", "--remove-key"}, runOptions{
+		cwd:    dir,
+		stdin:  strings.NewReader(""),
+		stdout: new(bytes.Buffer),
+		stderr: new(bytes.Buffer),
+	})
+	if err == nil {
+		t.Fatalf("expected unsafe key path error")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "refusing to remove key file") {
+		t.Fatalf("expected safety error, got %v", err)
+	}
+
+	if _, statErr := os.Stat(outsideKey); statErr != nil {
+		t.Fatalf("expected outside key to remain, stat err=%v", statErr)
+	}
+}
+
+func TestRunUninstallDoesNotPartiallyRemoveWhenKeyPathIsDirectory(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	keyDir := filepath.Join(dir, "keysdir")
+	if err := os.MkdirAll(keyDir, 0o700); err != nil {
+		t.Fatalf("mkdir key dir: %v", err)
+	}
+
+	cfg := config.Default()
+	cfg.KeyFile = keyDir
+	cfgPath := filepath.Join(dir, ".dpx.yaml")
+	if err := config.Save(cfgPath, cfg); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	err := run([]string{"uninstall", "--yes", "--remove-key"}, runOptions{
+		cwd:    dir,
+		stdin:  strings.NewReader(""),
+		stdout: new(bytes.Buffer),
+		stderr: new(bytes.Buffer),
+	})
+	if err == nil {
+		t.Fatalf("expected error for directory key path")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "directory") {
+		t.Fatalf("expected directory error, got %v", err)
+	}
+
+	if _, statErr := os.Stat(cfgPath); statErr != nil {
+		t.Fatalf("expected config to remain on preflight failure, stat err=%v", statErr)
 	}
 }
 
@@ -701,7 +845,7 @@ func TestRunTUIEncryptsSuggestedFileWithFullscreenShell(t *testing.T) {
 		t.Fatalf("write source: %v", err)
 	}
 
-	input := strings.NewReader("1\n1\n2\nsecret-123\n\n")
+	input := strings.NewReader("1\n1\n2\nsecret-123\nsecret-123\n\n")
 	stdout := new(bytes.Buffer)
 	if err := run([]string{"tui"}, runOptions{cwd: dir, stdout: stdout, stderr: new(bytes.Buffer), stdin: input}); err != nil {
 		t.Fatalf("run tui: %v", err)
@@ -719,12 +863,12 @@ func TestRunTUIEncryptsManualPathWhenNoSuggestions(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	sourcePath := filepath.Join(dir, "notes.txt")
+	sourcePath := filepath.Join(t.TempDir(), "notes.txt")
 	if err := os.WriteFile(sourcePath, []byte("FOO=bar\n"), 0o600); err != nil {
 		t.Fatalf("write source: %v", err)
 	}
 
-	input := strings.NewReader("1\n" + sourcePath + "\n2\nsecret-123\n\n")
+	input := strings.NewReader("1\n1\n" + sourcePath + "\n2\nsecret-123\nsecret-123\n\n")
 	stdout := new(bytes.Buffer)
 	if err := run([]string{"tui"}, runOptions{cwd: dir, stdout: stdout, stderr: new(bytes.Buffer), stdin: input}); err != nil {
 		t.Fatalf("run tui: %v", err)
@@ -735,6 +879,158 @@ func TestRunTUIEncryptsManualPathWhenNoSuggestions(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "File to encrypt") {
 		t.Fatalf("expected manual file prompt, got %q", stdout.String())
+	}
+}
+
+func TestRunEncryptAllowsManualPathWhenSuggestionsExist(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	suggestedPath := filepath.Join(dir, ".env")
+	manualPath := filepath.Join(dir, "notes.txt")
+	if err := os.WriteFile(suggestedPath, []byte("FOO=bar\n"), 0o600); err != nil {
+		t.Fatalf("write suggested file: %v", err)
+	}
+	if err := os.WriteFile(manualPath, []byte("hello\n"), 0o600); err != nil {
+		t.Fatalf("write manual file: %v", err)
+	}
+
+	stdin := strings.NewReader("3\n" + manualPath + "\nsecret-123\n")
+	stdout := new(bytes.Buffer)
+	if err := run([]string{"encrypt"}, runOptions{
+		cwd:    dir,
+		stdin:  stdin,
+		stdout: stdout,
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("run encrypt without file path: %v", err)
+	}
+
+	if _, err := os.Stat(manualPath + ".dpx"); err != nil {
+		t.Fatalf("expected manual path to be encrypted: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "File to encrypt") {
+		t.Fatalf("expected manual path prompt, got %q", stdout.String())
+	}
+}
+
+func TestRunEncryptPromptsManualPathWhenNoSuggestions(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	manualPath := filepath.Join(t.TempDir(), "notes.txt")
+	if err := os.WriteFile(manualPath, []byte("hello\n"), 0o600); err != nil {
+		t.Fatalf("write manual file: %v", err)
+	}
+
+	stdin := strings.NewReader("1\n" + manualPath + "\nsecret-123\n")
+	stdout := new(bytes.Buffer)
+	if err := run([]string{"encrypt"}, runOptions{
+		cwd:    dir,
+		stdin:  stdin,
+		stdout: stdout,
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("run encrypt without suggestions: %v", err)
+	}
+
+	if _, err := os.Stat(manualPath + ".dpx"); err != nil {
+		t.Fatalf("expected manual path to be encrypted: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "File to encrypt") {
+		t.Fatalf("expected manual path prompt, got %q", stdout.String())
+	}
+}
+
+func TestRunEncryptSuggestionsIncludeCommonFileTypes(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	files := []string{".env", "notes.txt", "README.md", "script.js", "payload.bin", "app.exe"}
+	for _, name := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("DATA\n"), 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	stdin := strings.NewReader("1\nsecret-123\n")
+	stdout := new(bytes.Buffer)
+	if err := run([]string{"encrypt"}, runOptions{
+		cwd:    dir,
+		stdin:  stdin,
+		stdout: stdout,
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("run encrypt with suggestions: %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "Select a file to encrypt (all files mode)") {
+		t.Fatalf("expected updated suggestion title, got %q", out)
+	}
+	for _, name := range files {
+		if !strings.Contains(out, name) {
+			t.Fatalf("expected %s in suggestion output, got %q", name, out)
+		}
+	}
+}
+
+func TestRunEncryptCanSearchCandidateByKeyword(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, ".env")
+	notesPath := filepath.Join(dir, "notes.txt")
+	if err := os.WriteFile(envPath, []byte("FOO=bar\n"), 0o600); err != nil {
+		t.Fatalf("write env: %v", err)
+	}
+	if err := os.WriteFile(notesPath, []byte("hello\n"), 0o600); err != nil {
+		t.Fatalf("write notes: %v", err)
+	}
+
+	stdin := strings.NewReader("4\nnotes\nsecret-123\n")
+	if err := run([]string{"encrypt"}, runOptions{
+		cwd:    dir,
+		stdin:  stdin,
+		stdout: new(bytes.Buffer),
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("run encrypt search flow: %v", err)
+	}
+
+	if _, err := os.Stat(notesPath + ".dpx"); err != nil {
+		t.Fatalf("expected searched file to be encrypted: %v", err)
+	}
+}
+
+func TestRunEncryptCanSwitchToEnvMode(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, ".env")
+	notesPath := filepath.Join(dir, "notes.txt")
+	if err := os.WriteFile(envPath, []byte("FOO=bar\n"), 0o600); err != nil {
+		t.Fatalf("write env: %v", err)
+	}
+	if err := os.WriteFile(notesPath, []byte("hello\n"), 0o600); err != nil {
+		t.Fatalf("write notes: %v", err)
+	}
+
+	stdin := strings.NewReader("5\n1\nsecret-123\n")
+	if err := run([]string{"encrypt"}, runOptions{
+		cwd:    dir,
+		stdin:  stdin,
+		stdout: new(bytes.Buffer),
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("run encrypt switch scope flow: %v", err)
+	}
+
+	if _, err := os.Stat(envPath + ".dpx"); err != nil {
+		t.Fatalf("expected .env to be encrypted after switching mode: %v", err)
+	}
+	if _, err := os.Stat(notesPath + ".dpx"); err == nil {
+		t.Fatalf("did not expect notes.txt to be encrypted in this flow")
 	}
 }
 
@@ -799,6 +1095,90 @@ func TestRunDirectDpxDecryptsUsingPassword(t *testing.T) {
 	}
 	if !bytes.Equal(restored, plaintext) {
 		t.Fatalf("restored mismatch: got %q want %q", restored, plaintext)
+	}
+}
+
+func TestRunPasswordEncryptDecryptSupportsVariousFileTypes(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		data []byte
+		mode os.FileMode
+	}{
+		{name: "notes.txt", data: []byte("hello text file\n"), mode: 0o600},
+		{name: "README.md", data: []byte("# Title\n\nmarkdown content\n"), mode: 0o600},
+		{name: "app.exe", data: []byte{0x4d, 0x5a, 0x90, 0x00, 0x03, 0x00, 0x00, 0x00}, mode: 0o755},
+		{name: "payload.bin", data: []byte{0x00, 0x01, 0x7f, 0xff, 0x10, 0x20, 0x30, 0x40}, mode: 0o600},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			sourcePath := filepath.Join(dir, tc.name)
+			if err := os.WriteFile(sourcePath, tc.data, tc.mode); err != nil {
+				t.Fatalf("write source: %v", err)
+			}
+
+			if err := run([]string{"encrypt", sourcePath, "--password", "secret-123"}, runOptions{
+				cwd:    dir,
+				stdin:  strings.NewReader(""),
+				stdout: new(bytes.Buffer),
+				stderr: new(bytes.Buffer),
+			}); err != nil {
+				t.Fatalf("encrypt %s: %v", tc.name, err)
+			}
+			if err := os.Remove(sourcePath); err != nil {
+				t.Fatalf("remove source: %v", err)
+			}
+
+			encryptedPath := sourcePath + ".dpx"
+			if err := run([]string{"decrypt", encryptedPath, "--password", "secret-123"}, runOptions{
+				cwd:    dir,
+				stdin:  strings.NewReader(""),
+				stdout: new(bytes.Buffer),
+				stderr: new(bytes.Buffer),
+			}); err != nil {
+				t.Fatalf("decrypt %s: %v", tc.name, err)
+			}
+
+			restored, err := os.ReadFile(sourcePath)
+			if err != nil {
+				t.Fatalf("read restored: %v", err)
+			}
+			if !bytes.Equal(restored, tc.data) {
+				t.Fatalf("restored content mismatch for %s", tc.name)
+			}
+
+			info, err := os.Stat(sourcePath)
+			if err != nil {
+				t.Fatalf("stat restored: %v", err)
+			}
+			if runtime.GOOS != "windows" && info.Mode().Perm() != tc.mode.Perm() {
+				t.Fatalf("mode mismatch for %s: got %04o want %04o", tc.name, info.Mode().Perm(), tc.mode.Perm())
+			}
+		})
+	}
+}
+
+func TestExpandHomeSupportsSlashAndBackslash(t *testing.T) {
+	t.Parallel()
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("user home dir: %v", err)
+	}
+
+	tests := []string{"~/dpx/keys.txt", "~\\dpx\\keys.txt"}
+	for _, input := range tests {
+		got := expandHome(input)
+		if !strings.HasPrefix(got, home) {
+			t.Fatalf("expandHome(%q) should start with home dir %q, got %q", input, home, got)
+		}
+		if !strings.Contains(got, "dpx") || !strings.Contains(got, "keys.txt") {
+			t.Fatalf("expandHome(%q) unexpected result %q", input, got)
+		}
 	}
 }
 
@@ -893,7 +1273,7 @@ func TestRunTUIAutoEncryptAndDecryptFlow(t *testing.T) {
 		t.Fatalf("write source: %v", err)
 	}
 
-	encryptInput := strings.NewReader("4\n" + sourcePath + "\nsecret-123\n\n")
+	encryptInput := strings.NewReader("4\n" + sourcePath + "\nsecret-123\nsecret-123\n\n")
 	encryptOut := new(bytes.Buffer)
 	if err := run([]string{"tui"}, runOptions{
 		cwd:    dir,
@@ -907,7 +1287,7 @@ func TestRunTUIAutoEncryptAndDecryptFlow(t *testing.T) {
 	if _, err := os.Stat(encryptedPath); err != nil {
 		t.Fatalf("expected encrypted output: %v", err)
 	}
-	if !strings.Contains(encryptOut.String(), "File path (.env or .dpx)") {
+	if !strings.Contains(encryptOut.String(), "File path (any file or .dpx)") {
 		t.Fatalf("expected auto file prompt, got %q", encryptOut.String())
 	}
 	if !strings.Contains(encryptOut.String(), "Password: ") {
@@ -933,5 +1313,33 @@ func TestRunTUIAutoEncryptAndDecryptFlow(t *testing.T) {
 	}
 	if !bytes.Equal(restored, plaintext) {
 		t.Fatalf("restored mismatch: got %q want %q", restored, plaintext)
+	}
+}
+
+func TestRunTUIPasswordConfirmationMismatchCanRetry(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, ".env")
+	if err := os.WriteFile(sourcePath, []byte("FOO=bar\n"), 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	input := strings.NewReader("1\n1\n2\nsecret-123\nwrong-pass\nsecret-123\nsecret-123\n\n")
+	stdout := new(bytes.Buffer)
+	if err := run([]string{"tui"}, runOptions{
+		cwd:    dir,
+		stdin:  input,
+		stdout: stdout,
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("expected retry flow to succeed, got %v", err)
+	}
+
+	if _, err := os.Stat(sourcePath + ".dpx"); err != nil {
+		t.Fatalf("expected encrypted output after retry: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "Password confirmation does not match") {
+		t.Fatalf("expected mismatch hint in output, got %q", stdout.String())
 	}
 }

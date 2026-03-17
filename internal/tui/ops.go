@@ -209,13 +209,17 @@ func resolveConfigSource(cwd string) (configSource, error) {
 }
 
 func expandHome(path string) string {
-	if strings.HasPrefix(path, "~/") {
-		home, err := os.UserHomeDir()
-		if err == nil {
-			return filepath.Join(home, path[2:])
-		}
+	rest, ok := trimHomePrefix(path)
+	if !ok {
+		return path
 	}
-	return path
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return path
+	}
+	rest = strings.ReplaceAll(rest, "\\", string(os.PathSeparator))
+	rest = strings.ReplaceAll(rest, "/", string(os.PathSeparator))
+	return filepath.Join(home, rest)
 }
 
 func containsString(items []string, value string) bool {
@@ -225,4 +229,15 @@ func containsString(items []string, value string) bool {
 		}
 	}
 	return false
+}
+
+func trimHomePrefix(path string) (string, bool) {
+	switch {
+	case strings.HasPrefix(path, "~/"):
+		return path[2:], true
+	case strings.HasPrefix(path, "~\\"):
+		return path[2:], true
+	default:
+		return "", false
+	}
 }

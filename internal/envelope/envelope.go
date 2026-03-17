@@ -20,12 +20,13 @@ const (
 )
 
 type Metadata struct {
-	Version         int
-	Mode            string
-	OriginalName    string
-	CreatedAt       time.Time
-	PayloadEncoding string
-	KDF             *KDFParams
+	Version          int
+	Mode             string
+	OriginalName     string
+	OriginalFileMode *uint32
+	CreatedAt        time.Time
+	PayloadEncoding  string
+	KDF              *KDFParams
 }
 
 type KDFParams struct {
@@ -55,11 +56,31 @@ func Marshal(meta Metadata, payload []byte) ([]byte, error) {
 	if meta.PayloadEncoding != "base64" {
 		return nil, fmt.Errorf("unsupported payload encoding %q", meta.PayloadEncoding)
 	}
+	if err := validateHeaderValue("Mode", meta.Mode); err != nil {
+		return nil, err
+	}
+	if err := validateHeaderValue("Original-Name", meta.OriginalName); err != nil {
+		return nil, err
+	}
+	if err := validateHeaderValue("Payload-Encoding", meta.PayloadEncoding); err != nil {
+		return nil, err
+	}
+	if meta.KDF != nil {
+		if err := validateHeaderValue("KDF-Algorithm", meta.KDF.Algorithm); err != nil {
+			return nil, err
+		}
+		if err := validateHeaderValue("KDF-Salt", meta.KDF.SaltBase64); err != nil {
+			return nil, err
+		}
+	}
 
 	var buf bytes.Buffer
 	fmt.Fprintf(&buf, "%s: %d\n", headerVersionKey, meta.Version)
 	fmt.Fprintf(&buf, "Mode: %s\n", meta.Mode)
 	fmt.Fprintf(&buf, "Original-Name: %s\n", meta.OriginalName)
+	if meta.OriginalFileMode != nil {
+		fmt.Fprintf(&buf, "Original-Mode: %04o\n", *meta.OriginalFileMode)
+	}
 	fmt.Fprintf(&buf, "Created-At: %s\n", meta.CreatedAt.UTC().Format(time.RFC3339))
 	fmt.Fprintf(&buf, "Payload-Encoding: %s\n", meta.PayloadEncoding)
 	if meta.KDF != nil {
@@ -110,9 +131,22 @@ func Unmarshal(data []byte) (Metadata, []byte, error) {
 			}
 			meta.Version = version
 		case "Mode":
+			if err := validateHeaderValue("Mode", value); err != nil {
+				return meta, nil, err
+			}
 			meta.Mode = value
 		case "Original-Name":
+			if err := validateHeaderValue("Original-Name", value); err != nil {
+				return meta, nil, err
+			}
 			meta.OriginalName = value
+		case "Original-Mode":
+			n, err := strconv.ParseUint(value, 8, 32)
+			if err != nil {
+				return meta, nil, fmt.Errorf("parse original mode: %w", err)
+			}
+			mode := uint32(n)
+			meta.OriginalFileMode = &mode
 		case "Created-At":
 			ts, err := time.Parse(time.RFC3339, value)
 			if err != nil {
@@ -120,11 +154,20 @@ func Unmarshal(data []byte) (Metadata, []byte, error) {
 			}
 			meta.CreatedAt = ts
 		case "Payload-Encoding":
+			if err := validateHeaderValue("Payload-Encoding", value); err != nil {
+				return meta, nil, err
+			}
 			meta.PayloadEncoding = value
 		case "KDF-Algorithm":
+			if err := validateHeaderValue("KDF-Algorithm", value); err != nil {
+				return meta, nil, err
+			}
 			ensureKDF(&meta)
 			meta.KDF.Algorithm = value
 		case "KDF-Salt":
+			if err := validateHeaderValue("KDF-Salt", value); err != nil {
+				return meta, nil, err
+			}
 			ensureKDF(&meta)
 			meta.KDF.SaltBase64 = value
 		case "KDF-Memory-KiB":
@@ -176,4 +219,16 @@ func ensureKDF(meta *Metadata) {
 	if meta.KDF == nil {
 		meta.KDF = &KDFParams{}
 	}
+}
+
+func validateHeaderValue(field, value string) error {
+	if strings.ContainsAny(value, "\r\n") {
+		return fmt.Errorf("invalid %s: multiline values are not allowed", field)
+	}
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("invalid %s: control characters are not allowed", field)
+		}
+	}
+	return nil
 }

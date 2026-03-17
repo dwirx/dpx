@@ -11,7 +11,15 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
     steps:
@@ -27,7 +35,7 @@ jobs:
         run: go test ./...
 
       - name: Build binary
-        run: go build -trimpath -ldflags "-s -w -X main.version=ci" -o dpx ./cmd/dpx
+        run: go build -trimpath -ldflags "-s -w -X main.version=ci" ./cmd/dpx
 
   package:
     runs-on: ubuntu-latest

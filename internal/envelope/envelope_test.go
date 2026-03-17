@@ -12,9 +12,13 @@ func TestMarshalUnmarshalRoundTrip(t *testing.T) {
 	t.Parallel()
 
 	meta := envelope.Metadata{
-		Version:         1,
-		Mode:            envelope.ModePassword,
-		OriginalName:    ".env",
+		Version:      1,
+		Mode:         envelope.ModePassword,
+		OriginalName: ".env",
+		OriginalFileMode: func() *uint32 {
+			mode := uint32(0o640)
+			return &mode
+		}(),
 		CreatedAt:       time.Date(2026, 3, 17, 10, 11, 12, 0, time.UTC),
 		PayloadEncoding: "base64",
 		KDF: &envelope.KDFParams{
@@ -47,6 +51,9 @@ func TestMarshalUnmarshalRoundTrip(t *testing.T) {
 	if decodedMeta.OriginalName != meta.OriginalName {
 		t.Fatalf("original name mismatch: got %q want %q", decodedMeta.OriginalName, meta.OriginalName)
 	}
+	if decodedMeta.OriginalFileMode == nil || *decodedMeta.OriginalFileMode != 0o640 {
+		t.Fatalf("original mode mismatch: got %#v", decodedMeta.OriginalFileMode)
+	}
 	if decodedMeta.KDF == nil || decodedMeta.KDF.Algorithm != "argon2id" {
 		t.Fatalf("expected KDF metadata to survive roundtrip")
 	}
@@ -78,5 +85,21 @@ func TestUnmarshalAcceptsLegacyHeader(t *testing.T) {
 	}
 	if !bytes.Equal(payload, []byte("cipher")) {
 		t.Fatalf("legacy payload mismatch: %q", payload)
+	}
+}
+
+func TestMarshalRejectsHeaderInjectionInOriginalName(t *testing.T) {
+	t.Parallel()
+
+	meta := envelope.Metadata{
+		Version:         1,
+		Mode:            envelope.ModePassword,
+		OriginalName:    "notes\nKDF-Iterations: 1",
+		CreatedAt:       time.Now().UTC(),
+		PayloadEncoding: "base64",
+	}
+
+	if _, err := envelope.Marshal(meta, []byte("ciphertext")); err == nil {
+		t.Fatal("expected marshal to reject header injection")
 	}
 }

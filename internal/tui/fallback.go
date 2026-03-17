@@ -24,26 +24,9 @@ func RunFallback(svc app.Service, cfg config.Config, cwd string, stdin io.Reader
 
 	switch action {
 	case "Encrypt":
-		candidates, err := svc.Discover(cwd)
+		inputPath, err := chooseEncryptPathFallback(reader, stdout, svc, cwd)
 		if err != nil {
 			return err
-		}
-		inputPath := ""
-		if len(candidates) == 0 {
-			fmt.Fprintln(stdout, "No suggested files found in current directory.")
-			inputPath, err = prompt(reader, stdout, "File to encrypt: ")
-			if err != nil {
-				return err
-			}
-			if strings.TrimSpace(inputPath) == "" {
-				return fmt.Errorf("file path is required")
-			}
-		} else {
-			candidate, err := chooseCandidate(reader, stdout, "Select a file to encrypt", candidates)
-			if err != nil {
-				return err
-			}
-			inputPath = candidate.Path
 		}
 		mode, err := chooseString(reader, stdout, "Choose encryption mode", []string{"Age", "Password"})
 		if err != nil {
@@ -63,11 +46,11 @@ func RunFallback(svc app.Service, cfg config.Config, cwd string, stdin io.Reader
 			}
 		} else {
 			req.Mode = envelope.ModePassword
-			pass, err := prompt(reader, stdout, "Password: ")
+			passphrase, err := promptPasswordWithConfirmation(reader, stdout)
 			if err != nil {
 				return err
 			}
-			req.Passphrase = []byte(pass)
+			req.Passphrase = passphrase
 		}
 		out, err := prompt(reader, stdout, fmt.Sprintf("Output path [%s]: ", req.InputPath+cfg.DefaultSuffix))
 		if err != nil {
@@ -152,7 +135,7 @@ func RunFallback(svc app.Service, cfg config.Config, cwd string, stdin io.Reader
 		fmt.Fprintf(stdout, "Version: %d\nMode: %s\nOriginal Name: %s\nCreated At: %s\n", meta.Version, meta.Mode, meta.OriginalName, meta.CreatedAt.Format("2006-01-02 15:04:05Z07:00"))
 		return nil
 	case "Auto":
-		filePath, err := prompt(reader, stdout, "File path (.env or .dpx): ")
+		filePath, err := prompt(reader, stdout, "File path (any file or .dpx): ")
 		if err != nil {
 			return err
 		}
@@ -186,11 +169,11 @@ func RunFallback(svc app.Service, cfg config.Config, cwd string, stdin io.Reader
 			return nil
 		}
 		req := app.EncryptRequest{InputPath: filePath, Mode: envelope.ModePassword}
-		pass, err := prompt(reader, stdout, "Password: ")
+		passphrase, err := promptPasswordWithConfirmation(reader, stdout)
 		if err != nil {
 			return err
 		}
-		req.Passphrase = []byte(pass)
+		req.Passphrase = passphrase
 		out, err := prompt(reader, stdout, fmt.Sprintf("Output path [%s]: ", req.InputPath+cfg.DefaultSuffix))
 		if err != nil {
 			return err
@@ -257,21 +240,79 @@ func renderHeader(w io.Writer) {
 	fmt.Fprintln(w, "╰──────────────────────────────────────────────────────────────╯")
 }
 
-func chooseCandidate(reader *bufio.Reader, stdout io.Writer, title string, candidates []discovery.Candidate) (discovery.Candidate, error) {
-	if len(candidates) == 0 {
-		return discovery.Candidate{}, fmt.Errorf("no candidate files found")
+func chooseEncryptPathFallback(reader *bufio.Reader, stdout io.Writer, svc app.Service, cwd string) (string, error) {
+	scope := encryptScopeAny
+	for {
+		candidates, err := discoverEncryptCandidatesByScopeFallback(svc, cwd, scope)
+		if err != nil {
+			return "", err
+		}
+		options := candidateLabels(candidates)
+		options = append(options, manualEncryptPathOption)
+		if len(candidates) > 0 {
+			options = append(options, searchEncryptPathOption)
+		}
+		options = append(options, encryptScopeSwitchOption(scope))
+		choice, err := chooseString(reader, stdout, encryptScopeTitle(scope), options)
+		if err != nil {
+			return "", err
+		}
+		switch choice {
+		case manualEncryptPathOption:
+			path, err := prompt(reader, stdout, "File to encrypt: ")
+			if err != nil {
+				return "", err
+			}
+			path = strings.TrimSpace(path)
+			if path == "" {
+				return "", fmt.Errorf("file path is required")
+			}
+			return path, nil
+		case searchEncryptPathOption:
+			if len(candidates) == 0 {
+				fmt.Fprintln(stdout, "No files available to search in this mode.")
+				continue
+			}
+			query, err := prompt(reader, stdout, "Search keyword: ")
+			if err != nil {
+				return "", err
+			}
+			query = strings.TrimSpace(query)
+			if query == "" {
+				continue
+			}
+			filtered := filterPathsByQuery(candidateLabels(candidates), query)
+			if len(filtered) == 0 {
+				fmt.Fprintf(stdout, "No files match %q in %s mode.\n", query, encryptScopeName(scope))
+				continue
+			}
+			if len(filtered) == 1 {
+				return filtered[0], nil
+			}
+			picked, err := chooseString(reader, stdout, fmt.Sprintf("Search results for %q", query), append(filtered, "[back] Back"))
+			if err != nil {
+				return "", err
+			}
+			if picked == "[back] Back" {
+				continue
+			}
+			return picked, nil
+		case encryptScopeSwitchOption(scope):
+			scope = toggleEncryptScope(scope)
+			continue
+		default:
+			return choice, nil
+		}
 	}
-	labels := make([]string, 0, len(candidates))
-	index := make(map[string]discovery.Candidate, len(candidates))
-	for _, candidate := range candidates {
-		labels = append(labels, candidate.Path)
-		index[candidate.Path] = candidate
+}
+
+func discoverEncryptCandidatesByScopeFallback(svc app.Service, cwd string, scope encryptScope) ([]discovery.Candidate, error) {
+	switch scope {
+	case encryptScopeEnv:
+		return svc.Discover(cwd)
+	default:
+		return svc.DiscoverEncryptTargets(cwd)
 	}
-	choice, err := chooseString(reader, stdout, title, labels)
-	if err != nil {
-		return discovery.Candidate{}, err
-	}
-	return index[choice], nil
 }
 
 func chooseString(reader *bufio.Reader, stdout io.Writer, title string, options []string) (string, error) {
@@ -323,4 +364,24 @@ func promptMultiline(reader *bufio.Reader, stdout io.Writer, label, terminator s
 		}
 	}
 	return strings.TrimSpace(strings.Join(lines, "\n")), nil
+}
+
+func promptPasswordWithConfirmation(reader *bufio.Reader, stdout io.Writer) ([]byte, error) {
+	for {
+		pass, err := prompt(reader, stdout, "Password: ")
+		if err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(pass) == "" {
+			return nil, fmt.Errorf("password is required")
+		}
+		confirm, err := prompt(reader, stdout, "Confirm password: ")
+		if err != nil {
+			return nil, err
+		}
+		if pass == confirm {
+			return []byte(pass), nil
+		}
+		fmt.Fprintln(stdout, "Password confirmation does not match. Try again.")
+	}
 }

@@ -14,6 +14,7 @@ import (
 	"github.com/dwirx/dpx/internal/crypto/password"
 	"github.com/dwirx/dpx/internal/discovery"
 	"github.com/dwirx/dpx/internal/envelope"
+	"github.com/dwirx/dpx/internal/safeio"
 )
 
 type Service struct {
@@ -41,7 +42,7 @@ func New(cfg config.Config) Service {
 }
 
 func (s Service) Init(path string) error {
-	if _, err := os.Stat(path); err == nil {
+	if _, err := safeio.Stat(path); err == nil {
 		return fmt.Errorf("config already exists: %s", path)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
@@ -81,14 +82,14 @@ func writeIdentityFile(path string, identity agex.Identity) error {
 		identity.PrivateKey,
 		"",
 	}, "\n")
-	if err := os.WriteFile(path, []byte(keyData), 0o600); err != nil {
+	if err := safeio.WriteFile(path, []byte(keyData), 0o600); err != nil {
 		return err
 	}
 	return nil
 }
 
 func (s Service) ReadIdentity(path string) (agex.Identity, error) {
-	data, err := os.ReadFile(path)
+	data, err := safeio.ReadFile(path)
 	if err != nil {
 		return agex.Identity{}, err
 	}
@@ -99,21 +100,34 @@ func (s Service) Discover(root string) ([]discovery.Candidate, error) {
 	return discovery.FindCandidates(root)
 }
 
+func (s Service) DiscoverEncryptTargets(root string) ([]discovery.Candidate, error) {
+	return discovery.FindEncryptTargets(root)
+}
+
 func (s Service) EncryptFile(req EncryptRequest) (string, error) {
 	if req.InputPath == "" {
 		return "", fmt.Errorf("input path is required")
 	}
-	plaintext, err := os.ReadFile(req.InputPath)
+	info, err := safeio.Stat(req.InputPath)
 	if err != nil {
 		return "", err
 	}
+	if info.IsDir() {
+		return "", fmt.Errorf("input path %q is a directory", req.InputPath)
+	}
+	plaintext, err := safeio.ReadFile(req.InputPath)
+	if err != nil {
+		return "", err
+	}
+	originalMode := uint32(info.Mode().Perm())
 
 	meta := envelope.Metadata{
-		Version:         1,
-		Mode:            req.Mode,
-		OriginalName:    filepath.Base(req.InputPath),
-		CreatedAt:       time.Now().UTC().Truncate(time.Second),
-		PayloadEncoding: "base64",
+		Version:          1,
+		Mode:             req.Mode,
+		OriginalName:     filepath.Base(req.InputPath),
+		OriginalFileMode: &originalMode,
+		CreatedAt:        time.Now().UTC().Truncate(time.Second),
+		PayloadEncoding:  "base64",
 	}
 
 	var payload []byte
@@ -166,14 +180,14 @@ func (s Service) EncryptFile(req EncryptRequest) (string, error) {
 	if outputPath == "" {
 		outputPath = req.InputPath + s.cfg.DefaultSuffix
 	}
-	if err := os.WriteFile(outputPath, encoded, 0o600); err != nil {
+	if err := writeFileSecure(outputPath, encoded, 0o600); err != nil {
 		return "", err
 	}
 	return outputPath, nil
 }
 
 func (s Service) Inspect(path string) (envelope.Metadata, error) {
-	data, err := os.ReadFile(path)
+	data, err := safeio.ReadFile(path)
 	if err != nil {
 		return envelope.Metadata{}, err
 	}
@@ -185,7 +199,7 @@ func (s Service) DecryptFile(req DecryptRequest) (string, error) {
 	if req.InputPath == "" {
 		return "", fmt.Errorf("input path is required")
 	}
-	data, err := os.ReadFile(req.InputPath)
+	data, err := safeio.ReadFile(req.InputPath)
 	if err != nil {
 		return "", err
 	}
@@ -244,7 +258,11 @@ func (s Service) DecryptFile(req DecryptRequest) (string, error) {
 	if outputPath == "" {
 		outputPath = filepath.Join(filepath.Dir(req.InputPath), filepath.Base(meta.OriginalName))
 	}
-	if err := os.WriteFile(outputPath, plaintext, 0o600); err != nil {
+	fileMode := os.FileMode(0o600)
+	if meta.OriginalFileMode != nil {
+		fileMode = os.FileMode(*meta.OriginalFileMode).Perm()
+	}
+	if err := writeFileSecure(outputPath, plaintext, fileMode); err != nil {
 		return "", err
 	}
 	return outputPath, nil
@@ -259,11 +277,11 @@ func (s Service) resolvePrivateKey(req DecryptRequest) (string, error) {
 		path = s.cfg.KeyFile
 	}
 	expanded := expandHome(path)
-	data, err := os.ReadFile(expanded)
+	data, err := safeio.ReadFile(expanded)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) && path == config.DefaultKeyFile {
 			legacyPath := expandHome(config.LegacyKeyFile)
-			legacyData, legacyErr := os.ReadFile(legacyPath)
+			legacyData, legacyErr := safeio.ReadFile(legacyPath)
 			if legacyErr == nil {
 				return string(legacyData), nil
 			}
@@ -274,11 +292,30 @@ func (s Service) resolvePrivateKey(req DecryptRequest) (string, error) {
 }
 
 func expandHome(path string) string {
-	if strings.HasPrefix(path, "~/") {
-		home, err := os.UserHomeDir()
-		if err == nil {
-			return filepath.Join(home, path[2:])
-		}
+	rest, ok := trimHomePrefix(path)
+	if !ok {
+		return path
 	}
-	return path
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return path
+	}
+	rest = strings.ReplaceAll(rest, "\\", string(os.PathSeparator))
+	rest = strings.ReplaceAll(rest, "/", string(os.PathSeparator))
+	return filepath.Join(home, rest)
+}
+
+func writeFileSecure(path string, data []byte, mode os.FileMode) error {
+	return safeio.WriteFile(path, data, mode)
+}
+
+func trimHomePrefix(path string) (string, bool) {
+	switch {
+	case strings.HasPrefix(path, "~/"):
+		return path[2:], true
+	case strings.HasPrefix(path, "~\\"):
+		return path[2:], true
+	default:
+		return "", false
+	}
 }
