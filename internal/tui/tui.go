@@ -23,6 +23,7 @@ type stage int
 
 const (
 	stageAction stage = iota
+	stageAutoPath
 	stageEncryptFile
 	stageEncryptManualPath
 	stageEncryptMode
@@ -82,7 +83,7 @@ func NewModel(svc app.Service, cfg config.Config, cwd string, stdin io.Reader, s
 		interactive = true
 	}
 	m := Model{svc: svc, cfg: cfg, cwd: cwd, stdin: stdin, stdout: stdout, interactive: interactive}
-	m.setMenu(stageAction, "Choose an action", []string{"Encrypt", "Decrypt", "Inspect"})
+	m.setMenu(stageAction, "Choose an action", []string{"Encrypt", "Decrypt", "Inspect", "Auto"})
 	return m, nil
 }
 
@@ -148,7 +149,8 @@ func (m Model) View() string {
 
 func (m Model) isInputStage() bool {
 	switch m.stage {
-	case stageEncryptManualPath,
+	case stageAutoPath,
+		stageEncryptManualPath,
 		stageEncryptPassword,
 		stageEncryptRecipients,
 		stageEncryptOutput,
@@ -235,6 +237,9 @@ func (m Model) submitSelection() (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.setMenu(stageInspectFile, "Select a file to inspect", files)
+		case "Auto":
+			m.setInput(stageAutoPath, "File path (.env or .dpx)", "", false)
+			return m, nil
 		}
 	case stageEncryptFile:
 		m.encryptReq = app.EncryptRequest{InputPath: selected}
@@ -263,6 +268,19 @@ func (m Model) submitSelection() (tea.Model, tea.Cmd) {
 func (m Model) submitInput() (tea.Model, tea.Cmd) {
 	value := strings.TrimSpace(m.input.Value())
 	switch m.stage {
+	case stageAutoPath:
+		if value == "" {
+			m.help = "File path is required, q quits"
+			return m, nil
+		}
+		if isEncryptedPath(value, m.cfg.DefaultSuffix) {
+			return m.startDecrypt(value)
+		}
+		m.encryptReq = app.EncryptRequest{
+			InputPath: value,
+			Mode:      envelope.ModePassword,
+		}
+		m.setInput(stageEncryptPassword, "Password", "", true)
 	case stageEncryptManualPath:
 		if value == "" {
 			m.help = "File path is required, q quits"
@@ -411,6 +429,16 @@ func findEncryptedFiles(root string) ([]string, error) {
 	}
 	sort.Strings(files)
 	return files, nil
+}
+
+func isEncryptedPath(path, defaultSuffix string) bool {
+	if strings.HasSuffix(path, ".dpx") {
+		return true
+	}
+	if defaultSuffix != "" && defaultSuffix != ".dpx" && strings.HasSuffix(path, defaultSuffix) {
+		return true
+	}
+	return false
 }
 
 func splitCSV(text string) []string {

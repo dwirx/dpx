@@ -16,7 +16,7 @@ func RunFallback(svc app.Service, cfg config.Config, cwd string, stdin io.Reader
 	reader := bufio.NewReader(stdin)
 	renderHeader(stdout)
 
-	action, err := chooseString(reader, stdout, "Choose an action", []string{"Encrypt", "Decrypt", "Inspect"})
+	action, err := chooseString(reader, stdout, "Choose an action", []string{"Encrypt", "Decrypt", "Inspect", "Auto"})
 	if err != nil {
 		return err
 	}
@@ -149,6 +149,57 @@ func RunFallback(svc app.Service, cfg config.Config, cwd string, stdin io.Reader
 			return err
 		}
 		fmt.Fprintf(stdout, "Version: %d\nMode: %s\nOriginal Name: %s\nCreated At: %s\n", meta.Version, meta.Mode, meta.OriginalName, meta.CreatedAt.Format("2006-01-02 15:04:05Z07:00"))
+		return nil
+	case "Auto":
+		filePath, err := prompt(reader, stdout, "File path (.env or .dpx): ")
+		if err != nil {
+			return err
+		}
+		filePath = strings.TrimSpace(filePath)
+		if filePath == "" {
+			return fmt.Errorf("file path is required")
+		}
+		if isEncryptedPath(filePath, cfg.DefaultSuffix) {
+			meta, err := svc.Inspect(filePath)
+			if err != nil {
+				return err
+			}
+			req := app.DecryptRequest{InputPath: filePath}
+			if meta.Mode == envelope.ModePassword {
+				pass, err := prompt(reader, stdout, "Password: ")
+				if err != nil {
+					return err
+				}
+				req.Passphrase = []byte(pass)
+			}
+			out, err := prompt(reader, stdout, "Output path [default]: ")
+			if err != nil {
+				return err
+			}
+			req.OutputPath = strings.TrimSpace(out)
+			outputPath, err := svc.DecryptFile(req)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(stdout, "Decrypted %s -> %s\n", filePath, outputPath)
+			return nil
+		}
+		req := app.EncryptRequest{InputPath: filePath, Mode: envelope.ModePassword}
+		pass, err := prompt(reader, stdout, "Password: ")
+		if err != nil {
+			return err
+		}
+		req.Passphrase = []byte(pass)
+		out, err := prompt(reader, stdout, fmt.Sprintf("Output path [%s]: ", req.InputPath+cfg.DefaultSuffix))
+		if err != nil {
+			return err
+		}
+		req.OutputPath = strings.TrimSpace(out)
+		outputPath, err := svc.EncryptFile(req)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "Encrypted %s -> %s\n", req.InputPath, outputPath)
 		return nil
 	default:
 		return fmt.Errorf("unsupported action %q", action)

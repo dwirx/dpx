@@ -261,3 +261,201 @@ func TestRunTUIEncryptsManualPathWhenNoSuggestions(t *testing.T) {
 		t.Fatalf("expected manual file prompt, got %q", stdout.String())
 	}
 }
+
+func TestRunDirectFileEncryptsUsingPassword(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, ".env")
+	if err := os.WriteFile(sourcePath, []byte("TOKEN=abc\n"), 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	if err := run([]string{sourcePath, "--password", "secret-123"}, runOptions{
+		cwd:    dir,
+		stdin:  strings.NewReader(""),
+		stdout: new(bytes.Buffer),
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("run direct encrypt: %v", err)
+	}
+
+	if _, err := os.Stat(sourcePath + ".dpx"); err != nil {
+		t.Fatalf("expected encrypted output: %v", err)
+	}
+}
+
+func TestRunDirectDpxDecryptsUsingPassword(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, ".env")
+	plaintext := []byte("TOKEN=abc\n")
+	if err := os.WriteFile(sourcePath, plaintext, 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	if err := run([]string{"encrypt", sourcePath, "--password", "secret-123"}, runOptions{
+		cwd:    dir,
+		stdin:  strings.NewReader(""),
+		stdout: new(bytes.Buffer),
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("run encrypt: %v", err)
+	}
+	if err := os.Remove(sourcePath); err != nil {
+		t.Fatalf("remove source: %v", err)
+	}
+
+	encryptedPath := sourcePath + ".dpx"
+	if err := run([]string{encryptedPath, "--password", "secret-123"}, runOptions{
+		cwd:    dir,
+		stdin:  strings.NewReader(""),
+		stdout: new(bytes.Buffer),
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("run direct decrypt: %v", err)
+	}
+
+	restored, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Fatalf("read restored: %v", err)
+	}
+	if !bytes.Equal(restored, plaintext) {
+		t.Fatalf("restored mismatch: got %q want %q", restored, plaintext)
+	}
+}
+
+func TestRunDirectEnvPrefersPasswordEvenWhenRecipientsConfigured(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	cfg := `version: 1
+default_suffix: ".dpx"
+key_file: "~/.config/dpx/age-keys.txt"
+age:
+  recipients:
+    - "age1invalidrecipientthatwouldfailifused"
+`
+	if err := os.WriteFile(filepath.Join(dir, ".dpx.yaml"), []byte(cfg), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	sourcePath := filepath.Join(dir, ".env")
+	if err := os.WriteFile(sourcePath, []byte("TOKEN=abc\n"), 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	stdout := new(bytes.Buffer)
+	if err := run([]string{sourcePath}, runOptions{
+		cwd:    dir,
+		stdin:  strings.NewReader("secret-123\n"),
+		stdout: stdout,
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("run direct env: %v", err)
+	}
+
+	if !strings.Contains(stdout.String(), "Password: ") {
+		t.Fatalf("expected password prompt, got %q", stdout.String())
+	}
+	if _, err := os.Stat(sourcePath + ".dpx"); err != nil {
+		t.Fatalf("expected encrypted output: %v", err)
+	}
+}
+
+func TestRunDirectDpxPromptsPasswordForDecrypt(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, ".env")
+	plaintext := []byte("TOKEN=abc\n")
+	if err := os.WriteFile(sourcePath, plaintext, 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	if err := run([]string{"encrypt", sourcePath, "--password", "secret-123"}, runOptions{
+		cwd:    dir,
+		stdin:  strings.NewReader(""),
+		stdout: new(bytes.Buffer),
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("run encrypt: %v", err)
+	}
+	if err := os.Remove(sourcePath); err != nil {
+		t.Fatalf("remove source: %v", err)
+	}
+
+	stdout := new(bytes.Buffer)
+	if err := run([]string{sourcePath + ".dpx"}, runOptions{
+		cwd:    dir,
+		stdin:  strings.NewReader("secret-123\n"),
+		stdout: stdout,
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("run direct decrypt: %v", err)
+	}
+
+	if !strings.Contains(stdout.String(), "Password: ") {
+		t.Fatalf("expected password prompt, got %q", stdout.String())
+	}
+	restored, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Fatalf("read restored: %v", err)
+	}
+	if !bytes.Equal(restored, plaintext) {
+		t.Fatalf("restored mismatch: got %q want %q", restored, plaintext)
+	}
+}
+
+func TestRunTUIAutoEncryptAndDecryptFlow(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, ".env")
+	plaintext := []byte("FOO=bar\n")
+	if err := os.WriteFile(sourcePath, plaintext, 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	encryptInput := strings.NewReader("4\n" + sourcePath + "\nsecret-123\n\n")
+	encryptOut := new(bytes.Buffer)
+	if err := run([]string{"tui"}, runOptions{
+		cwd:    dir,
+		stdin:  encryptInput,
+		stdout: encryptOut,
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("run tui auto encrypt: %v", err)
+	}
+	encryptedPath := sourcePath + ".dpx"
+	if _, err := os.Stat(encryptedPath); err != nil {
+		t.Fatalf("expected encrypted output: %v", err)
+	}
+	if !strings.Contains(encryptOut.String(), "File path (.env or .dpx)") {
+		t.Fatalf("expected auto file prompt, got %q", encryptOut.String())
+	}
+	if !strings.Contains(encryptOut.String(), "Password: ") {
+		t.Fatalf("expected password prompt, got %q", encryptOut.String())
+	}
+
+	if err := os.Remove(sourcePath); err != nil {
+		t.Fatalf("remove source: %v", err)
+	}
+	decryptInput := strings.NewReader("4\n" + encryptedPath + "\nsecret-123\n\n")
+	decryptOut := new(bytes.Buffer)
+	if err := run([]string{"tui"}, runOptions{
+		cwd:    dir,
+		stdin:  decryptInput,
+		stdout: decryptOut,
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("run tui auto decrypt: %v", err)
+	}
+	restored, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Fatalf("read restored: %v", err)
+	}
+	if !bytes.Equal(restored, plaintext) {
+		t.Fatalf("restored mismatch: got %q want %q", restored, plaintext)
+	}
+}

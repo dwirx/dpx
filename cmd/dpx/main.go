@@ -35,6 +35,8 @@ type runOptions struct {
 	reader *bufio.Reader
 	stdout io.Writer
 	stderr io.Writer
+
+	forcePassword bool
 }
 
 type configSource struct {
@@ -117,6 +119,9 @@ func run(args []string, opts runOptions) error {
 	case "tui":
 		return runTUI(svc, cfg, opts)
 	default:
+		if isDirectFileInvocation(args[0], opts.cwd) {
+			return runDirectPathInvocation(svc, cfg, args, opts)
+		}
 		return fmt.Errorf("unknown command %q", args[0])
 	}
 }
@@ -202,7 +207,7 @@ func runEncrypt(svc app.Service, cfg config.Config, args []string, opts runOptio
 	}
 
 	recipients := splitCSV(parsed.recipientsText)
-	mode := chooseMode(parsed.passwordText, parsed.useAge, recipients, cfg)
+	mode := chooseMode(parsed.passwordText, parsed.useAge, recipients, cfg, opts.forcePassword)
 	req := app.EncryptRequest{
 		InputPath:  filePath,
 		OutputPath: parsed.outPath,
@@ -307,11 +312,69 @@ func runTUI(svc app.Service, cfg config.Config, opts runOptions) error {
 	return tui.RunFallback(svc, cfg, opts.cwd, opts.stdin, opts.stdout)
 }
 
-func chooseMode(passwordText string, useAge bool, recipients []string, cfg config.Config) string {
+func runDirectPathInvocation(svc app.Service, cfg config.Config, args []string, opts runOptions) error {
+	if len(args) == 0 {
+		return fmt.Errorf("missing file path")
+	}
+	if isEncryptedPath(args[0], cfg.DefaultSuffix) {
+		return runDecrypt(svc, args, opts)
+	}
+	if isEnvFile(args[0]) {
+		opts.forcePassword = true
+	}
+	return runEncrypt(svc, cfg, args, opts)
+}
+
+func isDirectFileInvocation(arg, cwd string) bool {
+	if strings.TrimSpace(arg) == "" || strings.HasPrefix(arg, "-") {
+		return false
+	}
+	if strings.Contains(arg, "/") || strings.Contains(arg, "\\") || strings.HasPrefix(arg, ".") || strings.HasPrefix(arg, "~") {
+		return true
+	}
+	if fileExists(arg) {
+		return true
+	}
+	if cwd != "" && !filepath.IsAbs(arg) && fileExists(filepath.Join(cwd, arg)) {
+		return true
+	}
+	return false
+}
+
+func isEncryptedPath(path, defaultSuffix string) bool {
+	if strings.HasSuffix(path, ".dpx") {
+		return true
+	}
+	if defaultSuffix != "" && defaultSuffix != ".dpx" && strings.HasSuffix(path, defaultSuffix) {
+		return true
+	}
+	return false
+}
+
+func isEnvFile(path string) bool {
+	name := filepath.Base(path)
+	return name == ".env" || strings.HasPrefix(name, ".env.")
+}
+
+func fileExists(path string) bool {
+	if path == "" {
+		return false
+	}
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func chooseMode(passwordText string, useAge bool, recipients []string, cfg config.Config, forcePassword bool) string {
 	if passwordText != "" {
 		return envelope.ModePassword
 	}
-	if useAge || len(recipients) > 0 || len(cfg.Age.Recipients) > 0 {
+	if useAge || len(recipients) > 0 {
+		return envelope.ModeAge
+	}
+	if forcePassword {
+		return envelope.ModePassword
+	}
+	if len(cfg.Age.Recipients) > 0 {
 		return envelope.ModeAge
 	}
 	return envelope.ModePassword
@@ -630,6 +693,11 @@ func parseDecryptArgs(args []string) (decryptArgs, error) {
 func printUsage(w io.Writer) {
 	fmt.Fprintf(w, "%s %s\n", appName, version)
 	fmt.Fprintf(w, "%s <command> [flags]\n", appName)
+	fmt.Fprintf(w, "%s <file> [flags]\n", appName)
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Quick mode:")
+	fmt.Fprintln(w, "  dpx .env                  # encrypt")
+	fmt.Fprintln(w, "  dpx .env.dpx              # decrypt")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Commands:")
 	fmt.Fprintln(w, "  init")
