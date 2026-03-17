@@ -1,49 +1,55 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-`dpx` is a Go CLI/TUI project. Main entrypoint is `cmd/dpx/main.go`. Core logic is under `internal/`:
-- `internal/app`: high-level service orchestration
-- `internal/config`: `.dpx.yaml` parsing/defaults
-- `internal/envelope`: `.dpx` file format and metadata
-- `internal/crypto/*`: encryption backends (`age`, password)
-- `internal/discovery`: candidate secret file detection
-- `internal/tui`: interactive terminal flows
+`dpx` is a Go CLI/TUI project. Entry point: `cmd/dpx/main.go`.
 
-Release/install automation lives in `scripts/`. CI/CD workflows are in `.github/workflows/`.
+Core packages in `internal/`:
+- `app`: high-level encrypt/decrypt services.
+- `config`: `.dpx.yaml` loading/defaults.
+- `envelope`: armored `.dpx` metadata/payload format.
+- `crypto/agex` and `crypto/password`: encryption backends.
+- `envcrypt`: inline `.env` token encryption (`ENC[...]`).
+- `discovery`: suggested file scanning.
+- `tui`: fullscreen and fallback interactive flows.
+
+Automation:
+- `scripts/`: release/install scripts.
+- `.github/workflows/`: CI and manual release workflows.
 
 ## Build, Test, and Development Commands
-- `make build VERSION=dev`: build local binary (`./dpx`) with version metadata.
-- `make test`: run full test suite (`go test ./...`).
-- `go test ./...`: direct test command used by CI.
-- `make release VERSION=v0.2.0`: build cross-platform archives into `dist/`.
-- `go build -o dpx ./cmd/dpx`: quick local build without release flags.
-
-Use `make clean` to remove local binary and `dist/` artifacts.
+- `make build VERSION=dev`: build local binary with version metadata.
+- `make test` or `go test ./...`: run all tests.
+- `go test -race ./cmd/dpx ./internal/tui`: race check for user-facing flows.
+- `make release VERSION=vX.Y.Z`: build cross-platform assets in `dist/`.
+- `go build -o dpx ./cmd/dpx`: quick local binary build.
+- `dpx --help`: verify CLI UX/help output after command changes.
 
 ## Coding Style & Naming Conventions
 Follow standard Go conventions:
-- Run `gofmt` on all changed Go files before opening a PR.
-- Keep package names short/lowercase (`config`, `envelope`, `tui`).
-- Exported identifiers use `CamelCase`; unexported names use `camelCase`.
-- Prefer descriptive command/flag names consistent with existing CLI patterns (for example `--import-file`, `--no-config-update`).
+- Run `gofmt` on changed `.go` files before commit.
+- Keep package names short and lowercase.
+- Use `CamelCase` for exported symbols, `camelCase` for internal helpers.
+- Keep CLI flags explicit and consistent (example: `--identity`, `--password`, `--out`).
+- Match existing prompt wording for interactive CLI/TUI behavior.
 
 ## Testing Guidelines
-Tests use Go’s built-in `testing` package and live next to code as `*_test.go`.
-- Name tests by behavior, e.g. `TestRunDoctorReportsHealthyProject`.
-- Use `t.Parallel()` for isolated tests.
-- Use `t.TempDir()` and synthetic inputs; never depend on real user secrets.
-- Ensure `go test ./...` passes locally before pushing.
-
-No explicit coverage threshold is enforced, but new features and bug fixes should include regression tests.
+Tests use Go’s built-in `testing` package (`*_test.go` beside source files).
+- Name tests by behavior (example: `TestRunEnvInlinePasswordEncryptDecrypt`).
+- Use `t.TempDir()` and fake secrets only.
+- Prefer table tests for file/mode combinations (`.txt`, `.md`, `.bin`, `.exe`, `.env`).
+- For feature changes, add regression tests in service + CLI/TUI layers when relevant.
+- Ensure `go test ./...` passes before push.
 
 ## Commit & Pull Request Guidelines
-Recent history favors short, imperative subjects (`add ...`, `fix ...`) with occasional Conventional Commit prefixes (`feat:`). Keep commits focused and readable.
+Use focused, readable commits. Conventional prefixes are preferred (`feat:`, `fix:`, `docs:`).
 
 PRs should include:
-- concise summary of behavior changes
-- linked issue/context when available
-- test evidence (command run and result)
-- terminal output/screenshots for user-facing CLI/TUI changes
+- concise behavior summary
+- issue/context link (if available)
+- test evidence (`go test ./...`, race checks when relevant)
+- terminal snippets or screenshots for CLI/TUI UX updates
 
 ## Security & Configuration Tips
-Do not commit plaintext `.env` files, private keys, generated `.dpx` secrets, local binaries, or `dist/` artifacts. Use dummy values in fixtures and docs.
+Never commit plaintext real secrets, private keys, generated secret `.dpx` files, or local build artifacts.
+
+Use dummy fixtures in tests/docs and prefer `.env` samples with non-production placeholder values.
