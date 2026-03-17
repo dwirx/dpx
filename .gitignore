@@ -1,0 +1,14 @@
+dist/
+
+/dpx
+/dopx
+
+.env
+.env.*
+*.dpx
+
+.dpx.yaml
+.dopx.yaml
+
+*.log
+.DS_Store
