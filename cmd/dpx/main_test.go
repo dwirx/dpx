@@ -227,9 +227,10 @@ func TestRunDoctorReportsHealthyProject(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
+	keyPath := filepath.ToSlash(filepath.Join(dir, "keys.txt"))
 	cfg := `version: 1
 default_suffix: ".dpx"
-key_file: "` + filepath.Join(dir, "keys.txt") + `"
+key_file: "` + keyPath + `"
 age:
   recipients:
     - "age1testrecipient"
@@ -271,9 +272,10 @@ func TestRunDoctorFallsBackToLegacyConfig(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
+	legacyKeyPath := filepath.ToSlash(filepath.Join(dir, "legacy-keys.txt"))
 	cfg := `version: 1
 default_suffix: ".dpx"
-key_file: "` + filepath.Join(dir, "legacy-keys.txt") + `"
+key_file: "` + legacyKeyPath + `"
 age:
   recipients:
     - "age1legacyrecipient"
@@ -617,9 +619,10 @@ func TestRunTUIDoctorAction(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
+	keyPath := filepath.ToSlash(filepath.Join(dir, "keys.txt"))
 	cfg := `version: 1
 default_suffix: ".dpx"
-key_file: "` + filepath.Join(dir, "keys.txt") + `"
+key_file: "` + keyPath + `"
 age:
   recipients:
     - "age1testrecipient"
