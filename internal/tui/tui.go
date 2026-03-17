@@ -24,14 +24,17 @@ type stage int
 const (
 	stageAction stage = iota
 	stageEncryptFile
+	stageEncryptManualPath
 	stageEncryptMode
 	stageEncryptPassword
 	stageEncryptRecipients
 	stageEncryptOutput
 	stageDecryptFile
+	stageDecryptManualPath
 	stageDecryptPassword
 	stageDecryptOutput
 	stageInspectFile
+	stageInspectManualPath
 	stageResult
 )
 
@@ -145,7 +148,14 @@ func (m Model) View() string {
 
 func (m Model) isInputStage() bool {
 	switch m.stage {
-	case stageEncryptPassword, stageEncryptRecipients, stageEncryptOutput, stageDecryptPassword, stageDecryptOutput:
+	case stageEncryptManualPath,
+		stageEncryptPassword,
+		stageEncryptRecipients,
+		stageEncryptOutput,
+		stageDecryptManualPath,
+		stageDecryptPassword,
+		stageDecryptOutput,
+		stageInspectManualPath:
 		return true
 	default:
 		return false
@@ -198,34 +208,31 @@ func (m Model) submitSelection() (tea.Model, tea.Cmd) {
 		case "Encrypt":
 			candidates, err := m.svc.Discover(m.cwd)
 			if err != nil {
-				m.err = err
-				return m, tea.Quit
+				return m.fail(err)
 			}
 			if len(candidates) == 0 {
-				m.err = fmt.Errorf("no candidate files found")
-				return m, tea.Quit
+				m.setInput(stageEncryptManualPath, "File to encrypt", "", false)
+				return m, nil
 			}
 			m.setMenu(stageEncryptFile, "Select a file to encrypt", candidateLabels(candidates))
 		case "Decrypt":
 			files, err := findEncryptedFiles(m.cwd)
 			if err != nil {
-				m.err = err
-				return m, tea.Quit
+				return m.fail(err)
 			}
 			if len(files) == 0 {
-				m.err = fmt.Errorf("no .dpx files found")
-				return m, tea.Quit
+				m.setInput(stageDecryptManualPath, "File to decrypt (.dpx)", "", false)
+				return m, nil
 			}
 			m.setMenu(stageDecryptFile, "Select a file to decrypt", files)
 		case "Inspect":
 			files, err := findEncryptedFiles(m.cwd)
 			if err != nil {
-				m.err = err
-				return m, tea.Quit
+				return m.fail(err)
 			}
 			if len(files) == 0 {
-				m.err = fmt.Errorf("no .dpx files found")
-				return m, tea.Quit
+				m.setInput(stageInspectManualPath, "File to inspect (.dpx)", "", false)
+				return m, nil
 			}
 			m.setMenu(stageInspectFile, "Select a file to inspect", files)
 		}
@@ -246,31 +253,9 @@ func (m Model) submitSelection() (tea.Model, tea.Cmd) {
 			m.setInput(stageEncryptPassword, "Password", "", true)
 		}
 	case stageDecryptFile:
-		m.decryptReq = app.DecryptRequest{InputPath: selected}
-		meta, err := m.svc.Inspect(selected)
-		if err != nil {
-			m.err = err
-			return m, tea.Quit
-		}
-		m.decryptMeta = meta
-		if meta.Mode == envelope.ModePassword {
-			m.setInput(stageDecryptPassword, "Password", "", true)
-		} else {
-			m.setInput(stageDecryptOutput, "Output path (blank uses original name)", "", false)
-		}
+		return m.startDecrypt(selected)
 	case stageInspectFile:
-		meta, err := m.svc.Inspect(selected)
-		if err != nil {
-			m.err = err
-			return m, tea.Quit
-		}
-		m.stage = stageResult
-		m.title = "Inspect Result"
-		m.help = "Press Enter or q to exit"
-		m.result = fmt.Sprintf("Version: %d\nMode: %s\nOriginal Name: %s\nCreated At: %s", meta.Version, meta.Mode, meta.OriginalName, meta.CreatedAt.Format("2006-01-02 15:04:05Z07:00"))
-		if !m.interactive {
-			return m, tea.Quit
-		}
+		return m.showInspectResult(selected)
 	}
 	return m, nil
 }
@@ -278,6 +263,13 @@ func (m Model) submitSelection() (tea.Model, tea.Cmd) {
 func (m Model) submitInput() (tea.Model, tea.Cmd) {
 	value := strings.TrimSpace(m.input.Value())
 	switch m.stage {
+	case stageEncryptManualPath:
+		if value == "" {
+			m.help = "File path is required, q quits"
+			return m, nil
+		}
+		m.encryptReq = app.EncryptRequest{InputPath: value}
+		m.setMenu(stageEncryptMode, "Choose encryption mode", []string{"Age", "Password"})
 	case stageEncryptPassword:
 		m.encryptReq.Passphrase = []byte(value)
 		m.setInput(stageEncryptOutput, "Output path", m.encryptReq.InputPath+m.cfg.DefaultSuffix, false)
@@ -288,8 +280,7 @@ func (m Model) submitInput() (tea.Model, tea.Cmd) {
 		m.encryptReq.OutputPath = value
 		outputPath, err := m.svc.EncryptFile(m.encryptReq)
 		if err != nil {
-			m.err = err
-			return m, tea.Quit
+			return m.fail(err)
 		}
 		m.stage = stageResult
 		m.title = "Encrypt Result"
@@ -298,6 +289,12 @@ func (m Model) submitInput() (tea.Model, tea.Cmd) {
 		if !m.interactive {
 			return m, tea.Quit
 		}
+	case stageDecryptManualPath:
+		if value == "" {
+			m.help = "File path is required, q quits"
+			return m, nil
+		}
+		return m.startDecrypt(value)
 	case stageDecryptPassword:
 		m.decryptReq.Passphrase = []byte(value)
 		m.setInput(stageDecryptOutput, "Output path (blank uses original name)", "", false)
@@ -305,8 +302,7 @@ func (m Model) submitInput() (tea.Model, tea.Cmd) {
 		m.decryptReq.OutputPath = value
 		outputPath, err := m.svc.DecryptFile(m.decryptReq)
 		if err != nil {
-			m.err = err
-			return m, tea.Quit
+			return m.fail(err)
 		}
 		m.stage = stageResult
 		m.title = "Decrypt Result"
@@ -315,6 +311,54 @@ func (m Model) submitInput() (tea.Model, tea.Cmd) {
 		if !m.interactive {
 			return m, tea.Quit
 		}
+	case stageInspectManualPath:
+		if value == "" {
+			m.help = "File path is required, q quits"
+			return m, nil
+		}
+		return m.showInspectResult(value)
+	}
+	return m, nil
+}
+
+func (m Model) startDecrypt(path string) (tea.Model, tea.Cmd) {
+	m.decryptReq = app.DecryptRequest{InputPath: path}
+	meta, err := m.svc.Inspect(path)
+	if err != nil {
+		return m.fail(err)
+	}
+	m.decryptMeta = meta
+	if meta.Mode == envelope.ModePassword {
+		m.setInput(stageDecryptPassword, "Password", "", true)
+	} else {
+		m.setInput(stageDecryptOutput, "Output path (blank uses original name)", "", false)
+	}
+	return m, nil
+}
+
+func (m Model) showInspectResult(path string) (tea.Model, tea.Cmd) {
+	meta, err := m.svc.Inspect(path)
+	if err != nil {
+		return m.fail(err)
+	}
+	m.stage = stageResult
+	m.title = "Inspect Result"
+	m.help = "Press Enter or q to exit"
+	m.result = fmt.Sprintf("Version: %d\nMode: %s\nOriginal Name: %s\nCreated At: %s", meta.Version, meta.Mode, meta.OriginalName, meta.CreatedAt.Format("2006-01-02 15:04:05Z07:00"))
+	if !m.interactive {
+		return m, tea.Quit
+	}
+	return m, nil
+}
+
+func (m Model) fail(err error) (tea.Model, tea.Cmd) {
+	m.err = err
+	m.stage = stageResult
+	m.title = "Error"
+	m.help = "Press Enter or q to exit"
+	m.result = "Error: " + err.Error()
+	if !m.interactive {
+		return m, tea.Quit
 	}
 	return m, nil
 }

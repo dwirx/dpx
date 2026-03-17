@@ -238,3 +238,26 @@ func TestRunTUIEncryptsSuggestedFileWithFullscreenShell(t *testing.T) {
 		t.Fatalf("expected branded fullscreen tui output, got %q", stdout.String())
 	}
 }
+
+func TestRunTUIEncryptsManualPathWhenNoSuggestions(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, "notes.txt")
+	if err := os.WriteFile(sourcePath, []byte("FOO=bar\n"), 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	input := strings.NewReader("1\n" + sourcePath + "\n2\nsecret-123\n\n")
+	stdout := new(bytes.Buffer)
+	if err := run([]string{"tui"}, runOptions{cwd: dir, stdout: stdout, stderr: new(bytes.Buffer), stdin: input}); err != nil {
+		t.Fatalf("run tui: %v", err)
+	}
+
+	if _, err := os.Stat(sourcePath + ".dpx"); err != nil {
+		t.Fatalf("expected encrypted output: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "File to encrypt") {
+		t.Fatalf("expected manual file prompt, got %q", stdout.String())
+	}
+}

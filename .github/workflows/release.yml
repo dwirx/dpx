@@ -17,14 +17,15 @@ jobs:
     env:
       VERSION: ${{ inputs.version }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
 
@@ -35,15 +36,15 @@ jobs:
             exit 1
           fi
 
-      - name: Ensure tag does not already exist
+      - name: Check tag existence
+        id: tag_exists
         run: |
-          if git rev-parse "$VERSION" >/dev/null 2>&1; then
-            echo "tag already exists locally: $VERSION" >&2
-            exit 1
-          fi
           if git ls-remote --exit-code --tags origin "refs/tags/$VERSION" >/dev/null 2>&1; then
-            echo "tag already exists on origin: $VERSION" >&2
-            exit 1
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Tag already exists on origin: $VERSION"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Tag does not exist yet: $VERSION"
           fi
 
       - name: Run tests
@@ -67,12 +68,21 @@ jobs:
           git config user.email github-actions@users.noreply.github.com
 
       - name: Create and push tag
+        if: steps.tag_exists.outputs.exists != 'true'
         run: |
+          if git rev-parse "$VERSION" >/dev/null 2>&1; then
+            echo "tag already exists locally, deleting before recreate: $VERSION"
+            git tag -d "$VERSION"
+          fi
           git tag "$VERSION" "$GITHUB_SHA"
           git push origin "refs/tags/$VERSION"
 
       - name: Publish GitHub release
         run: |
-          gh release create "$VERSION" dist/* \
-            --title "$VERSION" \
-            --generate-notes
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            gh release upload "$VERSION" dist/* --clobber
+          else
+            gh release create "$VERSION" dist/* \
+              --title "$VERSION" \
+              --generate-notes
+          fi

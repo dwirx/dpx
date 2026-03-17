@@ -27,15 +27,28 @@ func RunFallback(svc app.Service, cfg config.Config, cwd string, stdin io.Reader
 		if err != nil {
 			return err
 		}
-		candidate, err := chooseCandidate(reader, stdout, "Select a file to encrypt", candidates)
-		if err != nil {
-			return err
+		inputPath := ""
+		if len(candidates) == 0 {
+			fmt.Fprintln(stdout, "No suggested files found in current directory.")
+			inputPath, err = prompt(reader, stdout, "File to encrypt: ")
+			if err != nil {
+				return err
+			}
+			if strings.TrimSpace(inputPath) == "" {
+				return fmt.Errorf("file path is required")
+			}
+		} else {
+			candidate, err := chooseCandidate(reader, stdout, "Select a file to encrypt", candidates)
+			if err != nil {
+				return err
+			}
+			inputPath = candidate.Path
 		}
 		mode, err := chooseString(reader, stdout, "Choose encryption mode", []string{"Age", "Password"})
 		if err != nil {
 			return err
 		}
-		req := app.EncryptRequest{InputPath: candidate.Path}
+		req := app.EncryptRequest{InputPath: inputPath}
 		if mode == "Age" {
 			req.Mode = envelope.ModeAge
 			if len(cfg.Age.Recipients) > 0 {
@@ -55,7 +68,7 @@ func RunFallback(svc app.Service, cfg config.Config, cwd string, stdin io.Reader
 			}
 			req.Passphrase = []byte(pass)
 		}
-		out, err := prompt(reader, stdout, fmt.Sprintf("Output path [%s]: ", candidate.Path+cfg.DefaultSuffix))
+		out, err := prompt(reader, stdout, fmt.Sprintf("Output path [%s]: ", req.InputPath+cfg.DefaultSuffix))
 		if err != nil {
 			return err
 		}
@@ -64,16 +77,28 @@ func RunFallback(svc app.Service, cfg config.Config, cwd string, stdin io.Reader
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(stdout, "Encrypted %s -> %s\n", candidate.Path, outputPath)
+		fmt.Fprintf(stdout, "Encrypted %s -> %s\n", req.InputPath, outputPath)
 		return nil
 	case "Decrypt":
 		files, err := findEncryptedFiles(cwd)
 		if err != nil {
 			return err
 		}
-		filePath, err := chooseString(reader, stdout, "Select a file to decrypt", files)
-		if err != nil {
-			return err
+		filePath := ""
+		if len(files) == 0 {
+			fmt.Fprintln(stdout, "No .dpx files found in current directory.")
+			filePath, err = prompt(reader, stdout, "File to decrypt (.dpx): ")
+			if err != nil {
+				return err
+			}
+			if strings.TrimSpace(filePath) == "" {
+				return fmt.Errorf("file path is required")
+			}
+		} else {
+			filePath, err = chooseString(reader, stdout, "Select a file to decrypt", files)
+			if err != nil {
+				return err
+			}
 		}
 		meta, err := svc.Inspect(filePath)
 		if err != nil {
@@ -103,9 +128,21 @@ func RunFallback(svc app.Service, cfg config.Config, cwd string, stdin io.Reader
 		if err != nil {
 			return err
 		}
-		filePath, err := chooseString(reader, stdout, "Select a file to inspect", files)
-		if err != nil {
-			return err
+		filePath := ""
+		if len(files) == 0 {
+			fmt.Fprintln(stdout, "No .dpx files found in current directory.")
+			filePath, err = prompt(reader, stdout, "File to inspect (.dpx): ")
+			if err != nil {
+				return err
+			}
+			if strings.TrimSpace(filePath) == "" {
+				return fmt.Errorf("file path is required")
+			}
+		} else {
+			filePath, err = chooseString(reader, stdout, "Select a file to inspect", files)
+			if err != nil {
+				return err
+			}
 		}
 		meta, err := svc.Inspect(filePath)
 		if err != nil {
