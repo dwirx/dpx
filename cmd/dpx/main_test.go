@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -11,6 +12,24 @@ import (
 	"github.com/dwirx/dpx/internal/config"
 	"github.com/dwirx/dpx/internal/crypto/agex"
 )
+
+func TestDPXHelperPrintEnv(t *testing.T) {
+	if os.Getenv("DPX_HELPER_PRINT_ENV") != "1" {
+		return
+	}
+	key := ""
+	for i, arg := range os.Args {
+		if arg == "--" && i+1 < len(os.Args) {
+			key = os.Args[i+1]
+			break
+		}
+	}
+	if key == "" {
+		os.Exit(2)
+	}
+	fmt.Fprint(os.Stdout, os.Getenv(key))
+	os.Exit(0)
+}
 
 func TestRunInitCreatesConfig(t *testing.T) {
 	t.Parallel()
@@ -1505,5 +1524,324 @@ func TestRunEnvInlineEncryptPromptsKeySelection(t *testing.T) {
 	}
 	if !strings.Contains(text, "JWT_SECRET=supersecretjwttoken") {
 		t.Fatalf("expected JWT_SECRET to remain plaintext for this selection")
+	}
+}
+
+func TestRunCommandInjectsEnvFromEncryptedEnvelope(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("DPX_HELPER_PRINT_ENV", "1")
+	sourcePath := filepath.Join(dir, ".env")
+	if err := os.WriteFile(sourcePath, []byte("API_KEY=abc123\nDEBUG=true\n"), 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	if err := run([]string{"encrypt", sourcePath, "--password", "secret-123"}, runOptions{
+		cwd:    dir,
+		stdin:  strings.NewReader(""),
+		stdout: new(bytes.Buffer),
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("encrypt source: %v", err)
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os executable: %v", err)
+	}
+
+	stdout := new(bytes.Buffer)
+	if err := run([]string{"run", sourcePath + ".dpx", "--password", "secret-123", "--", exe, "-test.run=TestDPXHelperPrintEnv", "--", "API_KEY"}, runOptions{
+		cwd:    dir,
+		stdin:  strings.NewReader(""),
+		stdout: stdout,
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("run command: %v", err)
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "abc123" {
+		t.Fatalf("expected injected API_KEY, got %q", got)
+	}
+}
+
+func TestRunCommandInjectsEnvFromInlineEncryptedFile(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("DPX_HELPER_PRINT_ENV", "1")
+	sourcePath := filepath.Join(dir, ".env")
+	if err := os.WriteFile(sourcePath, []byte("API_KEY=abc123\nDEBUG=true\n"), 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	if err := run([]string{"env", "encrypt", sourcePath, "--mode", "password", "--keys", "API_KEY", "--password", "secret-123"}, runOptions{
+		cwd:    dir,
+		stdin:  strings.NewReader(""),
+		stdout: new(bytes.Buffer),
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("env encrypt: %v", err)
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os executable: %v", err)
+	}
+
+	stdout := new(bytes.Buffer)
+	if err := run([]string{"run", sourcePath + ".dpx", "--password", "secret-123", "--", exe, "-test.run=TestDPXHelperPrintEnv", "--", "API_KEY"}, runOptions{
+		cwd:    dir,
+		stdin:  strings.NewReader(""),
+		stdout: stdout,
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("run command: %v", err)
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "abc123" {
+		t.Fatalf("expected injected API_KEY, got %q", got)
+	}
+}
+
+func TestRunPolicyCheckFailsOnPlaintextSensitiveKey(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, ".env")
+	if err := os.WriteFile(sourcePath, []byte("API_KEY=plain\nDEBUG=true\n"), 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	stdout := new(bytes.Buffer)
+	err := run([]string{"policy", "check", sourcePath}, runOptions{
+		cwd:    dir,
+		stdin:  strings.NewReader(""),
+		stdout: stdout,
+		stderr: new(bytes.Buffer),
+	})
+	if err == nil {
+		t.Fatalf("expected policy check to fail")
+	}
+	if !strings.Contains(stdout.String(), "API_KEY") {
+		t.Fatalf("expected output to mention API_KEY, got %q", stdout.String())
+	}
+}
+
+func TestRunPolicyCheckPassesForEncryptedValues(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, ".env")
+	if err := os.WriteFile(sourcePath, []byte("API_KEY=ENC[pwd:v1:abc]\nDEBUG=true\n"), 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	if err := run([]string{"policy", "check", sourcePath}, runOptions{
+		cwd:    dir,
+		stdin:  strings.NewReader(""),
+		stdout: new(bytes.Buffer),
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("expected policy check pass, got %v", err)
+	}
+}
+
+func TestRunEnvListAndGetFromInlineEncryptedFile(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, ".env")
+	if err := os.WriteFile(sourcePath, []byte("API_KEY=abc123\nDEBUG=true\n"), 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	if err := run([]string{"env", "encrypt", sourcePath, "--mode", "password", "--keys", "API_KEY", "--password", "secret-123"}, runOptions{
+		cwd:    dir,
+		stdin:  strings.NewReader(""),
+		stdout: new(bytes.Buffer),
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("env encrypt: %v", err)
+	}
+
+	listOut := new(bytes.Buffer)
+	if err := run([]string{"env", "list", sourcePath + ".dpx", "--password", "secret-123"}, runOptions{
+		cwd:    dir,
+		stdin:  strings.NewReader(""),
+		stdout: listOut,
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("env list: %v", err)
+	}
+	if !strings.Contains(listOut.String(), "API_KEY") || !strings.Contains(listOut.String(), "DEBUG") {
+		t.Fatalf("expected keys in list output, got %q", listOut.String())
+	}
+
+	getOut := new(bytes.Buffer)
+	if err := run([]string{"env", "get", sourcePath + ".dpx", "--key", "API_KEY", "--password", "secret-123"}, runOptions{
+		cwd:    dir,
+		stdin:  strings.NewReader(""),
+		stdout: getOut,
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("env get: %v", err)
+	}
+	if got := strings.TrimSpace(getOut.String()); got != "abc123" {
+		t.Fatalf("expected API_KEY value, got %q", got)
+	}
+}
+
+func TestRunEnvSetEncryptedAndReadBack(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, ".env")
+	if err := os.WriteFile(sourcePath, []byte("DEBUG=true\n"), 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	if err := run([]string{"env", "set", sourcePath, "--key", "API_KEY", "--value", "abc123", "--encrypt", "--mode", "password", "--password", "secret-123"}, runOptions{
+		cwd:    dir,
+		stdin:  strings.NewReader(""),
+		stdout: new(bytes.Buffer),
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("env set: %v", err)
+	}
+
+	updated, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Fatalf("read updated file: %v", err)
+	}
+	if !strings.Contains(string(updated), "API_KEY=ENC[pwd:v1:") {
+		t.Fatalf("expected encrypted API_KEY token, got %q", string(updated))
+	}
+
+	getOut := new(bytes.Buffer)
+	if err := run([]string{"env", "get", sourcePath, "--key", "API_KEY", "--password", "secret-123"}, runOptions{
+		cwd:    dir,
+		stdin:  strings.NewReader(""),
+		stdout: getOut,
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("env get from updated file: %v", err)
+	}
+	if got := strings.TrimSpace(getOut.String()); got != "abc123" {
+		t.Fatalf("expected API_KEY value, got %q", got)
+	}
+}
+
+func TestRunEnvEncryptUsesCreationRuleDefaults(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	cfg := `version: 1
+default_suffix: ".dpx"
+key_file: "~/.config/dpx/age-keys.txt"
+age:
+  recipients: []
+discovery:
+  include:
+    - ".env"
+policy:
+  creation_rules:
+    - path: ".env.production"
+      mode: "password"
+      encrypt_keys:
+        - "API_KEY"
+        - "JWT_SECRET"
+`
+	if err := os.WriteFile(filepath.Join(dir, ".dpx.yaml"), []byte(cfg), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	sourcePath := filepath.Join(dir, ".env.production")
+	if err := os.WriteFile(sourcePath, []byte("API_KEY=abc123\nJWT_SECRET=jwt123\nDEBUG=true\n"), 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	if err := run([]string{"env", "encrypt", sourcePath, "--password", "secret-123"}, runOptions{
+		cwd:    dir,
+		stdin:  strings.NewReader(""),
+		stdout: new(bytes.Buffer),
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("env encrypt with creation rules: %v", err)
+	}
+
+	encryptedData, err := os.ReadFile(sourcePath + ".dpx")
+	if err != nil {
+		t.Fatalf("read encrypted file: %v", err)
+	}
+	encryptedText := string(encryptedData)
+	if !strings.Contains(encryptedText, "API_KEY=ENC[pwd:v1:") {
+		t.Fatalf("expected API_KEY to be encrypted by creation rule")
+	}
+	if !strings.Contains(encryptedText, "JWT_SECRET=ENC[pwd:v1:") {
+		t.Fatalf("expected JWT_SECRET to be encrypted by creation rule")
+	}
+	if !strings.Contains(encryptedText, "DEBUG=true") {
+		t.Fatalf("expected DEBUG to remain plaintext, got %q", encryptedText)
+	}
+}
+
+func TestRunEnvUpdateKeysRotatesAgeRecipients(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, ".env")
+	if err := os.WriteFile(sourcePath, []byte("API_KEY=abc123\n"), 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	oldKeyPath := filepath.Join(dir, "old-age-keys.txt")
+	if err := run([]string{"keygen", "--out", oldKeyPath}, runOptions{
+		cwd:    dir,
+		stdin:  strings.NewReader(""),
+		stdout: new(bytes.Buffer),
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("keygen old identity: %v", err)
+	}
+	if err := run([]string{"env", "encrypt", sourcePath, "--mode", "age", "--keys", "API_KEY"}, runOptions{
+		cwd:    dir,
+		stdin:  strings.NewReader(""),
+		stdout: new(bytes.Buffer),
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("env encrypt age: %v", err)
+	}
+
+	newIdentity, err := agex.GenerateIdentity()
+	if err != nil {
+		t.Fatalf("generate new identity: %v", err)
+	}
+	newKeyPath := filepath.Join(dir, "new-age-keys.txt")
+	if err := os.WriteFile(newKeyPath, []byte(newIdentity.PrivateKey+"\n"), 0o600); err != nil {
+		t.Fatalf("write new key file: %v", err)
+	}
+
+	if err := run([]string{"env", "updatekeys", sourcePath + ".dpx", "--recipient", newIdentity.PublicKey, "--identity", oldKeyPath}, runOptions{
+		cwd:    dir,
+		stdin:  strings.NewReader(""),
+		stdout: new(bytes.Buffer),
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("env updatekeys: %v", err)
+	}
+
+	if err := run([]string{"env", "get", sourcePath + ".dpx", "--key", "API_KEY", "--identity", oldKeyPath}, runOptions{
+		cwd:    dir,
+		stdin:  strings.NewReader(""),
+		stdout: new(bytes.Buffer),
+		stderr: new(bytes.Buffer),
+	}); err == nil {
+		t.Fatal("expected old identity to fail after recipient rotation")
+	}
+
+	getOut := new(bytes.Buffer)
+	if err := run([]string{"env", "get", sourcePath + ".dpx", "--key", "API_KEY", "--identity", newKeyPath}, runOptions{
+		cwd:    dir,
+		stdin:  strings.NewReader(""),
+		stdout: getOut,
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("env get with new identity: %v", err)
+	}
+	if got := strings.TrimSpace(getOut.String()); got != "abc123" {
+		t.Fatalf("expected API_KEY value with new identity, got %q", got)
 	}
 }

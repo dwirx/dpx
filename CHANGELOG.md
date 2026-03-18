@@ -7,6 +7,24 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [v0.0.8] - 2026-03-18
+
+### Added
+- `dpx run` command to load env values from `.env`, `.env.dpx`, or inline encrypted `.env.dpx` and inject them into a child process.
+- `dpx policy check` command to detect plaintext sensitive keys in env/json/yaml-like files.
+- `dpx env list` and `dpx env get` for reading env keys from plaintext/encrypted sources.
+- `dpx env set` to add/update env keys with optional inline encryption.
+- `dpx env updatekeys` to rotate recipients for inline `ENC[age:...]` values.
+- `policy.creation_rules` support in `.dpx.yaml` for default mode and key selection per file pattern.
+- New docs:
+  - `docs/env-inline-workflow.md`
+  - `docs/creation-rules.md`
+  - `docs/testing-report-2026-03-18.md`
+
+### Changed
+- Expanded CLI help text and README examples for new env/runtime/policy commands.
+- Added broader automated coverage for env inline workflows, recipient rotation, policy checks, and runtime injection.
+
 ## [v0.0.7] - 2026-03-17
 
 ### Added

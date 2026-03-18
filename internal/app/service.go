@@ -55,6 +55,28 @@ type EnvInlineDecryptRequest struct {
 	PrivateKey   string
 }
 
+type EnvInlineSetRequest struct {
+	InputPath    string
+	OutputPath   string
+	Key          string
+	Value        string
+	Encrypt      bool
+	Mode         string
+	Passphrase   []byte
+	Recipients   []string
+	IdentityPath string
+	PrivateKey   string
+}
+
+type EnvInlineUpdateRecipientsRequest struct {
+	InputPath    string
+	OutputPath   string
+	IdentityPath string
+	PrivateKey   string
+	Recipients   []string
+	SelectedKeys []string
+}
+
 type EnvInlineResult struct {
 	OutputPath string
 	Updated    []string
@@ -215,6 +237,92 @@ func (s Service) DecryptEnvInlineFile(req EnvInlineDecryptRequest) (EnvInlineRes
 		outputPath = defaultInlineDecryptOutputPath(req.InputPath, s.cfg.DefaultSuffix)
 	}
 	if err := writeFileSecure(outputPath, decrypted, 0o600); err != nil {
+		return EnvInlineResult{}, err
+	}
+	return EnvInlineResult{OutputPath: outputPath, Updated: report.UpdatedKeys}, nil
+}
+
+func (s Service) SetEnvInlineValue(req EnvInlineSetRequest) (EnvInlineResult, error) {
+	if req.InputPath == "" {
+		return EnvInlineResult{}, fmt.Errorf("input path is required")
+	}
+	data, err := safeio.ReadFile(req.InputPath)
+	if err != nil {
+		return EnvInlineResult{}, err
+	}
+	if _, _, err := envelope.Unmarshal(data); err == nil {
+		return EnvInlineResult{}, fmt.Errorf("env set does not support full envelope files; decrypt first or use inline .env.dpx")
+	}
+
+	mode := req.Mode
+	recipients := append([]string{}, req.Recipients...)
+	if req.Encrypt && mode == envelope.ModeAge && len(recipients) == 0 {
+		recipients = append([]string{}, s.cfg.Age.Recipients...)
+	}
+	if req.Encrypt && mode == envelope.ModeAge && len(recipients) == 0 {
+		return EnvInlineResult{}, fmt.Errorf("recipients are required for age mode")
+	}
+	if req.Encrypt && mode == envelope.ModePassword && len(req.Passphrase) == 0 {
+		return EnvInlineResult{}, fmt.Errorf("passphrase is required for password mode")
+	}
+
+	updatedData, report, err := envcrypt.Set(data, envcrypt.SetRequest{
+		Key:        req.Key,
+		Value:      req.Value,
+		Encrypt:    req.Encrypt,
+		Mode:       mode,
+		Recipients: recipients,
+		Passphrase: req.Passphrase,
+	})
+	if err != nil {
+		return EnvInlineResult{}, err
+	}
+
+	outputPath := req.OutputPath
+	if outputPath == "" {
+		outputPath = req.InputPath
+	}
+	if err := writeFileSecure(outputPath, updatedData, 0o600); err != nil {
+		return EnvInlineResult{}, err
+	}
+	return EnvInlineResult{OutputPath: outputPath, Updated: report.UpdatedKeys}, nil
+}
+
+func (s Service) UpdateEnvInlineRecipients(req EnvInlineUpdateRecipientsRequest) (EnvInlineResult, error) {
+	if req.InputPath == "" {
+		return EnvInlineResult{}, fmt.Errorf("input path is required")
+	}
+	data, err := safeio.ReadFile(req.InputPath)
+	if err != nil {
+		return EnvInlineResult{}, err
+	}
+	if _, _, err := envelope.Unmarshal(data); err == nil {
+		return EnvInlineResult{}, fmt.Errorf("env updatekeys does not support full envelope files")
+	}
+
+	privateKey := strings.TrimSpace(req.PrivateKey)
+	if privateKey == "" {
+		privateKey, err = s.resolvePrivateKey(DecryptRequest{
+			IdentityPath: req.IdentityPath,
+			PrivateKey:   req.PrivateKey,
+		})
+		if err != nil {
+			return EnvInlineResult{}, err
+		}
+	}
+	updatedData, report, err := envcrypt.UpdateAgeRecipients(data, envcrypt.UpdateRecipientsRequest{
+		PrivateKey:   privateKey,
+		Recipients:   req.Recipients,
+		SelectedKeys: req.SelectedKeys,
+	})
+	if err != nil {
+		return EnvInlineResult{}, err
+	}
+	outputPath := req.OutputPath
+	if outputPath == "" {
+		outputPath = req.InputPath
+	}
+	if err := writeFileSecure(outputPath, updatedData, 0o600); err != nil {
 		return EnvInlineResult{}, err
 	}
 	return EnvInlineResult{OutputPath: outputPath, Updated: report.UpdatedKeys}, nil

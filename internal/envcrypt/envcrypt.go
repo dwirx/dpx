@@ -33,6 +33,21 @@ type DecryptRequest struct {
 	Passphrase []byte
 }
 
+type SetRequest struct {
+	Key        string
+	Value      string
+	Encrypt    bool
+	Mode       string
+	Recipients []string
+	Passphrase []byte
+}
+
+type UpdateRecipientsRequest struct {
+	PrivateKey   string
+	Recipients   []string
+	SelectedKeys []string
+}
+
 type Result struct {
 	UpdatedKeys []string
 }
@@ -52,6 +67,112 @@ type lineRecord struct {
 	left      string
 	key       string
 	value     string
+}
+
+func Set(content []byte, req SetRequest) ([]byte, Result, error) {
+	key := strings.TrimSpace(req.Key)
+	if !envKeyPattern.MatchString(key) {
+		return nil, Result{}, fmt.Errorf("invalid env key %q", req.Key)
+	}
+	if req.Encrypt {
+		if req.Mode != envelope.ModeAge && req.Mode != envelope.ModePassword {
+			return nil, Result{}, fmt.Errorf("unsupported mode %q", req.Mode)
+		}
+		if req.Mode == envelope.ModeAge && len(req.Recipients) == 0 {
+			return nil, Result{}, fmt.Errorf("recipients are required for age mode")
+		}
+		if req.Mode == envelope.ModePassword && len(req.Passphrase) == 0 {
+			return nil, Result{}, fmt.Errorf("passphrase is required for password mode")
+		}
+	}
+
+	value := req.Value
+	if req.Encrypt {
+		token, err := encryptValue(req.Value, EncryptRequest{
+			Mode:       req.Mode,
+			Recipients: req.Recipients,
+			Passphrase: req.Passphrase,
+		})
+		if err != nil {
+			return nil, Result{}, err
+		}
+		value = token
+	}
+
+	lines, hadTrailingNewline := parseLines(content)
+	updated := false
+	for idx, rec := range lines {
+		if !rec.hasAssign || rec.key != key {
+			continue
+		}
+		lines[idx].raw = rec.left + "=" + preserveValuePadding(rec.value, value)
+		updated = true
+		break
+	}
+	if !updated {
+		lines = append(lines, lineRecord{
+			raw:       key + "=" + value,
+			hasAssign: true,
+			left:      key,
+			key:       key,
+			value:     value,
+		})
+	}
+	return buildContent(lines, hadTrailingNewline), Result{UpdatedKeys: []string{key}}, nil
+}
+
+func UpdateAgeRecipients(content []byte, req UpdateRecipientsRequest) ([]byte, Result, error) {
+	if strings.TrimSpace(req.PrivateKey) == "" {
+		return nil, Result{}, fmt.Errorf("private key is required")
+	}
+	if len(req.Recipients) == 0 {
+		return nil, Result{}, fmt.Errorf("recipients are required")
+	}
+
+	selected := make(map[string]struct{}, len(req.SelectedKeys))
+	for _, key := range req.SelectedKeys {
+		trimmed := strings.TrimSpace(key)
+		if trimmed != "" {
+			selected[trimmed] = struct{}{}
+		}
+	}
+	allSelected := len(selected) == 0
+
+	lines, hadTrailingNewline := parseLines(content)
+	updatedSet := make(map[string]struct{})
+	for idx, rec := range lines {
+		if !rec.hasAssign {
+			continue
+		}
+		if !allSelected {
+			if _, ok := selected[rec.key]; !ok {
+				continue
+			}
+		}
+		mode, payload, ok := parseToken(rec.value)
+		if !ok || mode != envelope.ModeAge {
+			continue
+		}
+		plain, err := decryptValue(mode, payload, DecryptRequest{PrivateKey: req.PrivateKey})
+		if err != nil {
+			return nil, Result{}, fmt.Errorf("decrypt %s: %w", rec.key, err)
+		}
+		token, err := encryptValue(plain, EncryptRequest{
+			Mode:       envelope.ModeAge,
+			Recipients: req.Recipients,
+		})
+		if err != nil {
+			return nil, Result{}, fmt.Errorf("encrypt %s: %w", rec.key, err)
+		}
+		lines[idx].raw = rec.left + "=" + preserveValuePadding(rec.value, token)
+		updatedSet[rec.key] = struct{}{}
+	}
+
+	updatedKeys := mapKeysSorted(updatedSet)
+	if len(updatedKeys) == 0 {
+		return nil, Result{}, fmt.Errorf("no age-encrypted keys found")
+	}
+	return buildContent(lines, hadTrailingNewline), Result{UpdatedKeys: updatedKeys}, nil
 }
 
 func Encrypt(content []byte, req EncryptRequest) ([]byte, Result, error) {

@@ -64,6 +64,13 @@ discovery:
   include:
     - ".env"
     - ".env.local"
+policy:
+  creation_rules:
+    - path: ".env.production"
+      mode: "age"
+      encrypt_keys:
+        - "API_KEY"
+        - "JWT_SECRET"
 `)
 
 	if err := os.WriteFile(path, data, 0o600); err != nil {
@@ -82,5 +89,15 @@ discovery:
 	}
 	if len(loaded.Age.Recipients) != 1 || loaded.Age.Recipients[0] != "age1quotedrecipient" {
 		t.Fatalf("recipients mismatch: %#v", loaded.Age.Recipients)
+	}
+	if len(loaded.Policy.CreationRules) != 1 {
+		t.Fatalf("expected one creation rule, got %#v", loaded.Policy.CreationRules)
+	}
+	rule := loaded.Policy.CreationRules[0]
+	if rule.Path != ".env.production" || rule.Mode != "age" {
+		t.Fatalf("unexpected creation rule: %#v", rule)
+	}
+	if len(rule.EncryptKeys) != 2 || rule.EncryptKeys[0] != "API_KEY" {
+		t.Fatalf("unexpected encrypt keys: %#v", rule.EncryptKeys)
 	}
 }

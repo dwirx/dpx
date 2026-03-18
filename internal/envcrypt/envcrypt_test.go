@@ -127,6 +127,85 @@ func TestDetectModesAndListEncryptableKeys(t *testing.T) {
 	}
 }
 
+func TestSetAddsEncryptedKey(t *testing.T) {
+	t.Parallel()
+
+	out, result, err := envcrypt.Set([]byte("DEBUG=true\n"), envcrypt.SetRequest{
+		Key:        "API_KEY",
+		Value:      "abc123",
+		Encrypt:    true,
+		Mode:       envelope.ModePassword,
+		Passphrase: []byte("secret-123"),
+	})
+	if err != nil {
+		t.Fatalf("set key: %v", err)
+	}
+	if len(result.UpdatedKeys) != 1 || result.UpdatedKeys[0] != "API_KEY" {
+		t.Fatalf("unexpected updated keys: %#v", result.UpdatedKeys)
+	}
+	if !strings.Contains(string(out), "API_KEY=ENC[pwd:v1:") {
+		t.Fatalf("expected encrypted API_KEY, got %q", string(out))
+	}
+}
+
+func TestSetUpdatesExistingKeyPlaintext(t *testing.T) {
+	t.Parallel()
+
+	out, _, err := envcrypt.Set([]byte("API_KEY=old\n"), envcrypt.SetRequest{
+		Key:   "API_KEY",
+		Value: "new",
+	})
+	if err != nil {
+		t.Fatalf("set key: %v", err)
+	}
+	if string(out) != "API_KEY=new\n" {
+		t.Fatalf("unexpected output: %q", string(out))
+	}
+}
+
+func TestUpdateAgeRecipientsReEncryptsTokens(t *testing.T) {
+	t.Parallel()
+
+	oldIdentity, err := agex.GenerateIdentity()
+	if err != nil {
+		t.Fatalf("generate old identity: %v", err)
+	}
+	newIdentity, err := agex.GenerateIdentity()
+	if err != nil {
+		t.Fatalf("generate new identity: %v", err)
+	}
+
+	encrypted, _, err := envcrypt.Encrypt([]byte("API_KEY=abc123\n"), envcrypt.EncryptRequest{
+		Mode:       envelope.ModeAge,
+		Recipients: []string{oldIdentity.PublicKey},
+	})
+	if err != nil {
+		t.Fatalf("encrypt: %v", err)
+	}
+
+	updated, result, err := envcrypt.UpdateAgeRecipients(encrypted, envcrypt.UpdateRecipientsRequest{
+		PrivateKey: oldIdentity.PrivateKey,
+		Recipients: []string{newIdentity.PublicKey},
+	})
+	if err != nil {
+		t.Fatalf("update recipients: %v", err)
+	}
+	if len(result.UpdatedKeys) != 1 || result.UpdatedKeys[0] != "API_KEY" {
+		t.Fatalf("unexpected updated keys: %#v", result.UpdatedKeys)
+	}
+
+	if _, _, err := envcrypt.Decrypt(updated, envcrypt.DecryptRequest{PrivateKey: oldIdentity.PrivateKey}); err == nil {
+		t.Fatal("expected old identity decryption to fail after recipient rotation")
+	}
+	decrypted, _, err := envcrypt.Decrypt(updated, envcrypt.DecryptRequest{PrivateKey: newIdentity.PrivateKey})
+	if err != nil {
+		t.Fatalf("decrypt with new identity: %v", err)
+	}
+	if string(decrypted) != "API_KEY=abc123\n" {
+		t.Fatalf("unexpected decrypted output: %q", string(decrypted))
+	}
+}
+
 func contains(values []string, target string) bool {
 	for _, value := range values {
 		if value == target {

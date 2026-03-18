@@ -8,6 +8,11 @@ It supports two practical encryption modes:
 
 Latest changes are tracked in [`CHANGELOG.md`](./CHANGELOG.md).
 
+Additional guides:
+- [`docs/env-inline-workflow.md`](./docs/env-inline-workflow.md)
+- [`docs/creation-rules.md`](./docs/creation-rules.md)
+- [`docs/testing-report-2026-03-18.md`](./docs/testing-report-2026-03-18.md)
+
 ## ✨ Features
 
 - Encrypt `.env` into `.env.dpx`
@@ -242,6 +247,26 @@ Restore to a different path:
 dpx decrypt .env.dpx --out .env.restored
 ```
 
+### Run app with decrypted env (local/CI)
+
+Run a command with env injected from `.env` / `.env.dpx`:
+
+```bash
+dpx run -- node app.js
+```
+
+Specify encrypted source explicitly:
+
+```bash
+dpx run .env.dpx --password 'secret' -- node app.js
+```
+
+Use custom identity for `age` mode:
+
+```bash
+dpx run .env.dpx --identity ~/.config/dpx/age-keys.txt -- ./bin/server
+```
+
 ### Inline `.env` key encryption
 
 Encrypt selected keys only (values become `ENC[...]` inline):
@@ -254,6 +279,31 @@ Decrypt inline encrypted keys:
 
 ```bash
 dpx env decrypt .env.dpx
+```
+
+List keys from env source (plaintext/encrypted):
+
+```bash
+dpx env list .env.dpx --password 'secret'
+```
+
+Read a single key:
+
+```bash
+dpx env get .env.dpx --key API_KEY --password 'secret'
+```
+
+Set or update one key directly (plaintext or encrypted):
+
+```bash
+dpx env set .env --key API_KEY --value 'new-value'
+dpx env set .env.dpx --key API_KEY --value 'new-value' --encrypt --mode age
+```
+
+Rotate `age` recipients for existing inline encrypted keys:
+
+```bash
+dpx env updatekeys .env.dpx --recipient age1new...,age1team...
 ```
 
 Interactive inline flow:
@@ -289,6 +339,14 @@ KDF: argon2id
 ```bash
 dpx doctor
 ```
+
+### Policy check (plaintext secret detection)
+
+```bash
+dpx policy check .env
+```
+
+This command helps detect sensitive keys that still appear in plaintext.
 
 `doctor` reports:
 - which config file is in use
@@ -381,6 +439,24 @@ Rules:
 
 Decrypt inline encrypted `ENC[...]` values back into plaintext env values.
 
+### `dpx env set [<file>] --key <KEY> --value <VALUE> [--encrypt] [--mode age|password] [--recipient <csv>] [--password <text>] [--out <path>]`
+
+Set or replace one env key.
+
+Rules:
+- default behavior writes plaintext value
+- use `--encrypt` to store as `ENC[...]` token
+- if mode is omitted while encrypting, DPX picks from creation rule or config defaults
+
+### `dpx env updatekeys [<file>] --recipient <csv> [--keys <csv>] [--identity <path>] [--out <path>]`
+
+Re-encrypt existing inline `ENC[age:...]` keys for new recipients.
+
+Rules:
+- requires the old private key (`--identity`) to decrypt current tokens
+- `--keys` limits rotation to selected env keys
+- if omitted, all inline age-encrypted keys are rotated
+
 ### `dpx inspect <file.dpx>`
 
 Show safe metadata only.
@@ -429,6 +505,13 @@ discovery:
     - "*.env"
     - ".secret*"
     - ".credentials*"
+policy:
+  creation_rules:
+    - path: ".env.production"
+      mode: "age"
+      encrypt_keys:
+        - "API_KEY"
+        - "JWT_SECRET"
 ```
 
 ## File Format

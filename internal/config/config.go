@@ -19,6 +19,7 @@ type Config struct {
 	KeyFile       string          `yaml:"key_file"`
 	Age           AgeConfig       `yaml:"age"`
 	Discovery     DiscoveryConfig `yaml:"discovery"`
+	Policy        PolicyConfig    `yaml:"policy"`
 }
 
 type AgeConfig struct {
@@ -27,6 +28,16 @@ type AgeConfig struct {
 
 type DiscoveryConfig struct {
 	Include []string `yaml:"include"`
+}
+
+type PolicyConfig struct {
+	CreationRules []CreationRule `yaml:"creation_rules"`
+}
+
+type CreationRule struct {
+	Path        string   `yaml:"path"`
+	Mode        string   `yaml:"mode"`
+	EncryptKeys []string `yaml:"encrypt_keys"`
 }
 
 func Default() Config {
@@ -73,6 +84,9 @@ func Load(path string) (Config, error) {
 	}
 	if cfg.Version == 0 {
 		cfg.Version = Default().Version
+	}
+	if cfg.Policy.CreationRules == nil {
+		cfg.Policy.CreationRules = []CreationRule{}
 	}
 	return cfg, nil
 }

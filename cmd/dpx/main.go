@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -19,6 +20,7 @@ import (
 	"github.com/dwirx/dpx/internal/crypto/agex"
 	"github.com/dwirx/dpx/internal/discovery"
 	"github.com/dwirx/dpx/internal/envelope"
+	"github.com/dwirx/dpx/internal/policy"
 	"github.com/dwirx/dpx/internal/safeio"
 	"github.com/dwirx/dpx/internal/tui"
 )
@@ -120,6 +122,8 @@ func run(args []string, opts runOptions) error {
 		return runDoctor(opts)
 	case "uninstall":
 		return runUninstall(args[1:], opts)
+	case "policy":
+		return runPolicy(args[1:], opts)
 	}
 
 	cfg, _, err := loadConfig(opts.cwd)
@@ -131,6 +135,8 @@ func run(args []string, opts runOptions) error {
 	switch command {
 	case "keygen":
 		return runKeygen(svc, cfg, args[1:], opts)
+	case "run":
+		return runRun(svc, cfg, args[1:], opts)
 	case "encrypt":
 		return runEncrypt(svc, cfg, args[1:], opts)
 	case "decrypt":
@@ -623,9 +629,29 @@ type envDecryptArgs struct {
 	identityPath string
 }
 
+type envSetArgs struct {
+	filePath       string
+	outPath        string
+	key            string
+	value          string
+	hasValue       bool
+	mode           string
+	encrypt        bool
+	passwordText   string
+	recipientsText string
+}
+
+type envUpdateKeysArgs struct {
+	filePath       string
+	outPath        string
+	identityPath   string
+	recipientsText string
+	keysText       string
+}
+
 func runEnv(svc app.Service, cfg config.Config, args []string, opts runOptions) error {
 	if len(args) == 0 {
-		return fmt.Errorf("env requires subcommand: encrypt or decrypt")
+		return fmt.Errorf("env requires subcommand: encrypt, decrypt, list, get, set, or updatekeys")
 	}
 	subcommand := strings.ToLower(strings.TrimSpace(args[0]))
 	switch subcommand {
@@ -633,6 +659,14 @@ func runEnv(svc app.Service, cfg config.Config, args []string, opts runOptions) 
 		return runEnvEncrypt(svc, cfg, args[1:], opts)
 	case "decrypt", "dec":
 		return runEnvDecrypt(svc, cfg, args[1:], opts)
+	case "list", "ls":
+		return runEnvList(svc, cfg, args[1:], opts)
+	case "get":
+		return runEnvGet(svc, cfg, args[1:], opts)
+	case "set":
+		return runEnvSet(svc, cfg, args[1:], opts)
+	case "updatekeys":
+		return runEnvUpdateKeys(svc, cfg, args[1:], opts)
 	default:
 		return fmt.Errorf("unknown env subcommand %q", subcommand)
 	}
@@ -651,8 +685,15 @@ func runEnvEncrypt(svc app.Service, cfg config.Config, args []string, opts runOp
 			return err
 		}
 	}
+	rule, hasRule := matchCreationRule(cfg, filePath)
 
 	mode := strings.TrimSpace(strings.ToLower(parsed.mode))
+	if mode == "" && hasRule {
+		ruleMode := strings.TrimSpace(strings.ToLower(rule.Mode))
+		if ruleMode == envelope.ModeAge || ruleMode == envelope.ModePassword {
+			mode = ruleMode
+		}
+	}
 	if mode == "" {
 		mode, err = chooseString(opts, "Choose env encryption mode", []string{"age", "password"})
 		if err != nil {
@@ -664,6 +705,9 @@ func runEnvEncrypt(svc app.Service, cfg config.Config, args []string, opts runOp
 	}
 
 	keys := splitCSV(parsed.keysText)
+	if len(keys) == 0 && hasRule && len(rule.EncryptKeys) > 0 {
+		keys = append([]string{}, rule.EncryptKeys...)
+	}
 	if len(keys) == 0 {
 		availableKeys, err := svc.ListEnvInlineKeys(filePath)
 		if err != nil {
@@ -766,6 +810,689 @@ func runEnvDecrypt(svc app.Service, cfg config.Config, args []string, opts runOp
 	fmt.Fprintf(opts.stdout, "Env inline decrypted %s -> %s\n", req.InputPath, result.OutputPath)
 	fmt.Fprintf(opts.stdout, "Updated keys (%d): %s\n", len(result.Updated), strings.Join(result.Updated, ", "))
 	return nil
+}
+
+func runEnvSet(svc app.Service, cfg config.Config, args []string, opts runOptions) error {
+	parsed, err := parseEnvSetArgs(args)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(parsed.key) == "" {
+		return fmt.Errorf("env set requires --key <name>")
+	}
+	if parsed.filePath == "" {
+		parsed.filePath, err = defaultRunSourcePath(opts.cwd, cfg.DefaultSuffix)
+		if err != nil {
+			return err
+		}
+	}
+
+	value := parsed.value
+	if !parsed.hasValue {
+		value, err = prompt(opts, "Value: ")
+		if err != nil {
+			return err
+		}
+	}
+
+	rule, hasRule := matchCreationRule(cfg, parsed.filePath)
+	mode := strings.TrimSpace(strings.ToLower(parsed.mode))
+	encrypt := parsed.encrypt
+	if !encrypt && (mode != "" || parsed.passwordText != "" || parsed.recipientsText != "") {
+		encrypt = true
+	}
+	if !encrypt && hasRule && containsString(rule.EncryptKeys, strings.TrimSpace(parsed.key)) {
+		encrypt = true
+		if mode == "" {
+			mode = strings.TrimSpace(strings.ToLower(rule.Mode))
+		}
+	}
+	if encrypt && mode == "" && hasRule {
+		ruleMode := strings.TrimSpace(strings.ToLower(rule.Mode))
+		if ruleMode == envelope.ModeAge || ruleMode == envelope.ModePassword {
+			mode = ruleMode
+		}
+	}
+	if encrypt && mode == "" {
+		mode = chooseMode(parsed.passwordText, false, splitCSV(parsed.recipientsText), cfg, false)
+	}
+	if encrypt && mode != envelope.ModeAge && mode != envelope.ModePassword {
+		return fmt.Errorf("unsupported env mode %q", mode)
+	}
+
+	req := app.EnvInlineSetRequest{
+		InputPath:  parsed.filePath,
+		OutputPath: parsed.outPath,
+		Key:        strings.TrimSpace(parsed.key),
+		Value:      value,
+		Encrypt:    encrypt,
+		Mode:       mode,
+	}
+	if encrypt {
+		switch mode {
+		case envelope.ModeAge:
+			req.Recipients = splitCSV(parsed.recipientsText)
+			if len(req.Recipients) == 0 {
+				req.Recipients = append([]string{}, cfg.Age.Recipients...)
+			}
+		case envelope.ModePassword:
+			req.Passphrase = []byte(parsed.passwordText)
+			if len(req.Passphrase) == 0 {
+				pass, err := promptSecretWithConfirmation(opts, "Password: ", "Confirm password: ")
+				if err != nil {
+					return err
+				}
+				req.Passphrase = []byte(pass)
+			}
+		}
+	}
+
+	result, err := svc.SetEnvInlineValue(req)
+	if err != nil {
+		return err
+	}
+	if req.Encrypt {
+		fmt.Fprintf(opts.stdout, "Env key %s updated and encrypted (%s) -> %s\n", req.Key, req.Mode, result.OutputPath)
+		return nil
+	}
+	fmt.Fprintf(opts.stdout, "Env key %s updated -> %s\n", req.Key, result.OutputPath)
+	return nil
+}
+
+func runEnvUpdateKeys(svc app.Service, cfg config.Config, args []string, opts runOptions) error {
+	parsed, err := parseEnvUpdateKeysArgs(args)
+	if err != nil {
+		return err
+	}
+	if parsed.filePath == "" {
+		parsed.filePath, err = defaultInlineSourcePath(opts.cwd, cfg.DefaultSuffix)
+		if err != nil {
+			return err
+		}
+	}
+	recipients := splitCSV(parsed.recipientsText)
+	if len(recipients) == 0 {
+		return fmt.Errorf("env updatekeys requires --recipient <csv>")
+	}
+	req := app.EnvInlineUpdateRecipientsRequest{
+		InputPath:    parsed.filePath,
+		OutputPath:   parsed.outPath,
+		IdentityPath: parsed.identityPath,
+		Recipients:   recipients,
+		SelectedKeys: splitCSV(parsed.keysText),
+	}
+	result, err := svc.UpdateEnvInlineRecipients(req)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(opts.stdout, "Env inline recipients updated %s -> %s\n", req.InputPath, result.OutputPath)
+	fmt.Fprintf(opts.stdout, "Updated keys (%d): %s\n", len(result.Updated), strings.Join(result.Updated, ", "))
+	return nil
+}
+
+type envReadArgs struct {
+	filePath     string
+	passwordText string
+	identityPath string
+	key          string
+}
+
+func runEnvList(svc app.Service, cfg config.Config, args []string, opts runOptions) error {
+	parsed, err := parseEnvReadArgs(args)
+	if err != nil {
+		return err
+	}
+	if parsed.filePath == "" {
+		parsed.filePath, err = defaultRunSourcePath(opts.cwd, cfg.DefaultSuffix)
+		if err != nil {
+			return err
+		}
+	}
+	values, err := loadRuntimeEnvValues(svc, runArgs{
+		filePath:     parsed.filePath,
+		passwordText: parsed.passwordText,
+		identityPath: parsed.identityPath,
+	}, opts)
+	if err != nil {
+		return err
+	}
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		fmt.Fprintln(opts.stdout, key)
+	}
+	return nil
+}
+
+func runEnvGet(svc app.Service, cfg config.Config, args []string, opts runOptions) error {
+	parsed, err := parseEnvReadArgs(args)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(parsed.key) == "" {
+		return fmt.Errorf("env get requires --key <name>")
+	}
+	if parsed.filePath == "" {
+		parsed.filePath, err = defaultRunSourcePath(opts.cwd, cfg.DefaultSuffix)
+		if err != nil {
+			return err
+		}
+	}
+	values, err := loadRuntimeEnvValues(svc, runArgs{
+		filePath:     parsed.filePath,
+		passwordText: parsed.passwordText,
+		identityPath: parsed.identityPath,
+	}, opts)
+	if err != nil {
+		return err
+	}
+	value, ok := values[parsed.key]
+	if !ok {
+		return fmt.Errorf("key %q not found", parsed.key)
+	}
+	fmt.Fprintln(opts.stdout, value)
+	return nil
+}
+
+func parseEnvReadArgs(args []string) (envReadArgs, error) {
+	var parsed envReadArgs
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch arg {
+		case "--password":
+			i++
+			if i >= len(args) {
+				return parsed, fmt.Errorf("missing value for --password")
+			}
+			parsed.passwordText = args[i]
+		case "--identity":
+			i++
+			if i >= len(args) {
+				return parsed, fmt.Errorf("missing value for --identity")
+			}
+			parsed.identityPath = args[i]
+		case "--key":
+			i++
+			if i >= len(args) {
+				return parsed, fmt.Errorf("missing value for --key")
+			}
+			parsed.key = args[i]
+		default:
+			if strings.HasPrefix(arg, "--") {
+				return parsed, fmt.Errorf("unknown flag %q", arg)
+			}
+			if parsed.filePath != "" {
+				return parsed, fmt.Errorf("unexpected argument %q", arg)
+			}
+			parsed.filePath = arg
+		}
+	}
+	return parsed, nil
+}
+
+func parseEnvSetArgs(args []string) (envSetArgs, error) {
+	var parsed envSetArgs
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch arg {
+		case "--out":
+			i++
+			if i >= len(args) {
+				return parsed, fmt.Errorf("missing value for --out")
+			}
+			parsed.outPath = args[i]
+		case "--key":
+			i++
+			if i >= len(args) {
+				return parsed, fmt.Errorf("missing value for --key")
+			}
+			parsed.key = args[i]
+		case "--value":
+			i++
+			if i >= len(args) {
+				return parsed, fmt.Errorf("missing value for --value")
+			}
+			parsed.value = args[i]
+			parsed.hasValue = true
+		case "--encrypt":
+			parsed.encrypt = true
+		case "--mode":
+			i++
+			if i >= len(args) {
+				return parsed, fmt.Errorf("missing value for --mode")
+			}
+			parsed.mode = strings.ToLower(strings.TrimSpace(args[i]))
+		case "--password":
+			i++
+			if i >= len(args) {
+				return parsed, fmt.Errorf("missing value for --password")
+			}
+			parsed.passwordText = args[i]
+		case "--recipient":
+			i++
+			if i >= len(args) {
+				return parsed, fmt.Errorf("missing value for --recipient")
+			}
+			parsed.recipientsText = args[i]
+		default:
+			if strings.HasPrefix(arg, "--") {
+				return parsed, fmt.Errorf("unknown flag %q", arg)
+			}
+			if parsed.filePath != "" {
+				return parsed, fmt.Errorf("unexpected argument %q", arg)
+			}
+			parsed.filePath = arg
+		}
+	}
+	return parsed, nil
+}
+
+func parseEnvUpdateKeysArgs(args []string) (envUpdateKeysArgs, error) {
+	var parsed envUpdateKeysArgs
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch arg {
+		case "--out":
+			i++
+			if i >= len(args) {
+				return parsed, fmt.Errorf("missing value for --out")
+			}
+			parsed.outPath = args[i]
+		case "--identity":
+			i++
+			if i >= len(args) {
+				return parsed, fmt.Errorf("missing value for --identity")
+			}
+			parsed.identityPath = args[i]
+		case "--recipient":
+			i++
+			if i >= len(args) {
+				return parsed, fmt.Errorf("missing value for --recipient")
+			}
+			parsed.recipientsText = args[i]
+		case "--keys":
+			i++
+			if i >= len(args) {
+				return parsed, fmt.Errorf("missing value for --keys")
+			}
+			parsed.keysText = args[i]
+		default:
+			if strings.HasPrefix(arg, "--") {
+				return parsed, fmt.Errorf("unknown flag %q", arg)
+			}
+			if parsed.filePath != "" {
+				return parsed, fmt.Errorf("unexpected argument %q", arg)
+			}
+			parsed.filePath = arg
+		}
+	}
+	return parsed, nil
+}
+
+type runArgs struct {
+	filePath     string
+	passwordText string
+	identityPath string
+	command      []string
+}
+
+func runRun(svc app.Service, cfg config.Config, args []string, opts runOptions) error {
+	parsed, err := parseRunArgs(args)
+	if err != nil {
+		return err
+	}
+	if parsed.filePath == "" {
+		parsed.filePath, err = defaultRunSourcePath(opts.cwd, cfg.DefaultSuffix)
+		if err != nil {
+			return err
+		}
+	}
+
+	envValues, err := loadRuntimeEnvValues(svc, parsed, opts)
+	if err != nil {
+		return err
+	}
+	if len(envValues) == 0 {
+		return fmt.Errorf("no environment variables loaded from %s", parsed.filePath)
+	}
+
+	cmd := exec.Command(parsed.command[0], parsed.command[1:]...)
+	cmd.Stdin = opts.stdin
+	cmd.Stdout = opts.stdout
+	cmd.Stderr = opts.stderr
+	cmd.Env = mergeCommandEnv(os.Environ(), envValues)
+	return cmd.Run()
+}
+
+func parseRunArgs(args []string) (runArgs, error) {
+	var parsed runArgs
+	separator := -1
+	for i, arg := range args {
+		if arg == "--" {
+			separator = i
+			break
+		}
+	}
+	if separator < 0 {
+		return parsed, fmt.Errorf(`run requires command separator "--", for example: dpx run .env.dpx -- app`)
+	}
+	parsed.command = append([]string{}, args[separator+1:]...)
+	if len(parsed.command) == 0 {
+		return parsed, fmt.Errorf("run requires a command after --")
+	}
+	left := args[:separator]
+	for i := 0; i < len(left); i++ {
+		arg := left[i]
+		switch arg {
+		case "--file", "-f":
+			i++
+			if i >= len(left) {
+				return parsed, fmt.Errorf("missing value for %s", arg)
+			}
+			parsed.filePath = left[i]
+		case "--password":
+			i++
+			if i >= len(left) {
+				return parsed, fmt.Errorf("missing value for --password")
+			}
+			parsed.passwordText = left[i]
+		case "--identity":
+			i++
+			if i >= len(left) {
+				return parsed, fmt.Errorf("missing value for --identity")
+			}
+			parsed.identityPath = left[i]
+		default:
+			if strings.HasPrefix(arg, "--") {
+				return parsed, fmt.Errorf("unknown flag %q", arg)
+			}
+			if parsed.filePath != "" {
+				return parsed, fmt.Errorf("unexpected argument %q", arg)
+			}
+			parsed.filePath = arg
+		}
+	}
+	return parsed, nil
+}
+
+func defaultRunSourcePath(cwd, defaultSuffix string) (string, error) {
+	candidates := []string{
+		filepath.Join(cwd, ".env"),
+		filepath.Join(cwd, ".env.dpx"),
+	}
+	if defaultSuffix != "" {
+		candidates = append(candidates, filepath.Join(cwd, ".env"+defaultSuffix))
+	}
+	for _, candidate := range candidates {
+		if fileExists(candidate) {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("run could not find default env source (.env or .env.dpx); pass --file")
+}
+
+func defaultInlineSourcePath(cwd, defaultSuffix string) (string, error) {
+	candidates := []string{
+		filepath.Join(cwd, ".env.dpx"),
+	}
+	if defaultSuffix != "" {
+		withSuffix := filepath.Join(cwd, ".env"+defaultSuffix)
+		if !containsString(candidates, withSuffix) {
+			candidates = append(candidates, withSuffix)
+		}
+	}
+	candidates = append(candidates, filepath.Join(cwd, ".env"))
+	for _, candidate := range candidates {
+		if fileExists(candidate) {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("env updatekeys could not find default source (.env.dpx or .env); pass file path")
+}
+
+func matchCreationRule(cfg config.Config, filePath string) (config.CreationRule, bool) {
+	cleanedPath := filepath.ToSlash(filepath.Clean(strings.TrimSpace(filePath)))
+	base := filepath.Base(cleanedPath)
+	absPath := ""
+	if resolvedAbs, err := filepath.Abs(filePath); err == nil {
+		absPath = filepath.ToSlash(filepath.Clean(resolvedAbs))
+	}
+
+	for _, rule := range cfg.Policy.CreationRules {
+		pattern := strings.TrimSpace(rule.Path)
+		if pattern == "" {
+			continue
+		}
+		pattern = filepath.ToSlash(pattern)
+		if ok, _ := filepath.Match(pattern, cleanedPath); ok {
+			return rule, true
+		}
+		if ok, _ := filepath.Match(pattern, base); ok {
+			return rule, true
+		}
+		if absPath != "" {
+			if ok, _ := filepath.Match(pattern, absPath); ok {
+				return rule, true
+			}
+		}
+	}
+	return config.CreationRule{}, false
+}
+
+func loadRuntimeEnvValues(svc app.Service, parsed runArgs, opts runOptions) (map[string]string, error) {
+	data, err := safeio.ReadFile(parsed.filePath)
+	if err != nil {
+		return nil, err
+	}
+
+	if meta, _, err := envelope.Unmarshal(data); err == nil {
+		request := app.DecryptRequest{
+			InputPath:    parsed.filePath,
+			IdentityPath: parsed.identityPath,
+			Passphrase:   []byte(parsed.passwordText),
+		}
+		if meta.Mode == envelope.ModePassword && len(request.Passphrase) == 0 {
+			pass, err := promptSecret(opts, "Password: ")
+			if err != nil {
+				return nil, err
+			}
+			request.Passphrase = []byte(pass)
+		}
+		plaintext, err := decryptToTempAndReadEnvelope(svc, request)
+		if err != nil {
+			return nil, err
+		}
+		return parseRuntimeEnvMap(plaintext), nil
+	}
+
+	hasAge, hasPassword, err := svc.DetectEnvInlineModes(parsed.filePath)
+	if err == nil && (hasAge || hasPassword) {
+		request := app.EnvInlineDecryptRequest{
+			InputPath:    parsed.filePath,
+			IdentityPath: parsed.identityPath,
+			Passphrase:   []byte(parsed.passwordText),
+		}
+		if hasPassword && len(request.Passphrase) == 0 {
+			pass, err := promptSecret(opts, "Password: ")
+			if err != nil {
+				return nil, err
+			}
+			request.Passphrase = []byte(pass)
+		}
+		plaintext, err := decryptToTempAndReadInline(svc, request)
+		if err != nil {
+			return nil, err
+		}
+		return parseRuntimeEnvMap(plaintext), nil
+	}
+
+	return parseRuntimeEnvMap(data), nil
+}
+
+func decryptToTempAndReadEnvelope(svc app.Service, req app.DecryptRequest) ([]byte, error) {
+	tempPath, cleanup, err := createTempEnvPath()
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
+	req.OutputPath = tempPath
+	if _, err := svc.DecryptFile(req); err != nil {
+		return nil, err
+	}
+	return safeio.ReadFile(tempPath)
+}
+
+func decryptToTempAndReadInline(svc app.Service, req app.EnvInlineDecryptRequest) ([]byte, error) {
+	tempPath, cleanup, err := createTempEnvPath()
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
+	req.OutputPath = tempPath
+	if _, err := svc.DecryptEnvInlineFile(req); err != nil {
+		return nil, err
+	}
+	return safeio.ReadFile(tempPath)
+}
+
+func createTempEnvPath() (string, func(), error) {
+	file, err := os.CreateTemp("", "dpx-run-*.env")
+	if err != nil {
+		return "", nil, err
+	}
+	path := file.Name()
+	if err := file.Close(); err != nil {
+		return "", nil, err
+	}
+	cleanup := func() { _ = os.Remove(path) }
+	return path, cleanup, nil
+}
+
+func parseRuntimeEnvMap(data []byte) map[string]string {
+	lines := strings.Split(string(data), "\n")
+	values := make(map[string]string, len(lines))
+	for _, line := range lines {
+		key, value, ok := parseRuntimeEnvLine(line)
+		if !ok {
+			continue
+		}
+		values[key] = value
+	}
+	return values
+}
+
+func parseRuntimeEnvLine(line string) (string, string, bool) {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+		return "", "", false
+	}
+	separator := strings.Index(line, "=")
+	if separator <= 0 {
+		return "", "", false
+	}
+	left := strings.TrimSpace(line[:separator])
+	if strings.HasPrefix(left, "export ") {
+		left = strings.TrimSpace(strings.TrimPrefix(left, "export "))
+	}
+	if left == "" {
+		return "", "", false
+	}
+	value := strings.TrimSpace(line[separator+1:])
+	return left, trimRuntimeValue(value), true
+}
+
+func trimRuntimeValue(value string) string {
+	if len(value) >= 2 {
+		if value[0] == '"' && value[len(value)-1] == '"' {
+			unquoted, err := strconv.Unquote(value)
+			if err == nil {
+				return unquoted
+			}
+			return value[1 : len(value)-1]
+		}
+		if value[0] == '\'' && value[len(value)-1] == '\'' {
+			return value[1 : len(value)-1]
+		}
+	}
+	return value
+}
+
+func mergeCommandEnv(base []string, overrides map[string]string) []string {
+	envMap := make(map[string]string, len(base)+len(overrides))
+	for _, pair := range base {
+		if pair == "" {
+			continue
+		}
+		parts := strings.SplitN(pair, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		envMap[parts[0]] = parts[1]
+	}
+	for key, value := range overrides {
+		envMap[key] = value
+	}
+	keys := make([]string, 0, len(envMap))
+	for key := range envMap {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	merged := make([]string, 0, len(keys))
+	for _, key := range keys {
+		merged = append(merged, key+"="+envMap[key])
+	}
+	return merged
+}
+
+func runPolicy(args []string, opts runOptions) error {
+	if len(args) == 0 {
+		return fmt.Errorf("policy requires subcommand: check")
+	}
+	switch strings.ToLower(strings.TrimSpace(args[0])) {
+	case "check":
+		return runPolicyCheck(args[1:], opts)
+	default:
+		return fmt.Errorf("unknown policy subcommand %q", args[0])
+	}
+}
+
+func runPolicyCheck(args []string, opts runOptions) error {
+	filePath := ".env"
+	if len(args) > 1 {
+		return fmt.Errorf("policy check expects at most one file path")
+	}
+	if len(args) == 1 {
+		filePath = strings.TrimSpace(args[0])
+		if filePath == "" {
+			return fmt.Errorf("file path is required")
+		}
+	}
+
+	data, err := safeio.ReadFile(filePath)
+	if err != nil {
+		return err
+	}
+	report := policy.Check(filePath, data)
+	if report.SkipReason != "" {
+		fmt.Fprintf(opts.stdout, "Policy OK (%s)\n", report.SkipReason)
+		return nil
+	}
+	if len(report.Findings) == 0 {
+		fmt.Fprintf(opts.stdout, "Policy OK: no plaintext sensitive keys found (%s)\n", report.Format)
+		return nil
+	}
+	fmt.Fprintf(opts.stdout, "Policy findings: %d (%s)\n", len(report.Findings), report.Format)
+	for _, finding := range report.Findings {
+		if finding.Line > 0 {
+			fmt.Fprintf(opts.stdout, "  - line %d key %s: %s\n", finding.Line, finding.Key, finding.Reason)
+		} else {
+			fmt.Fprintf(opts.stdout, "  - key %s: %s\n", finding.Key, finding.Reason)
+		}
+	}
+	return fmt.Errorf("policy check failed with %d finding(s)", len(report.Findings))
 }
 
 func chooseEnvInlineSource(opts runOptions, svc app.Service, cwd string) (string, error) {
@@ -1149,6 +1876,8 @@ var commandAliases = map[string]string{
 	"init":      "init",
 	"doctor":    "doctor",
 	"uninstall": "uninstall",
+	"policy":    "policy",
+	"run":       "run",
 	"env":       "env",
 	"keygen":    "keygen",
 	"encrypt":   "encrypt",
@@ -1593,6 +2322,8 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  dpx .env                  # encrypt")
 	fmt.Fprintln(w, "  dpx notes.txt             # encrypt any file")
 	fmt.Fprintln(w, "  dpx .env.dpx              # decrypt")
+	fmt.Fprintln(w, "  dpx run -- app            # load env then execute command")
+	fmt.Fprintln(w, "  dpx policy check .env     # detect plaintext sensitive values")
 	fmt.Fprintln(w, "  dpx encrypt               # interactive file picker + prompts")
 	fmt.Fprintln(w, "  dpx env encrypt           # interactive .env inline flow")
 	fmt.Fprintln(w, "  dpx e .env                # short alias for encrypt")
@@ -1602,6 +2333,10 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  dpx uninstall --yes --remove-key --remove-encrypted")
 	fmt.Fprintln(w, "  dpx env encrypt .env --mode age --keys API_KEY,JWT_SECRET")
 	fmt.Fprintln(w, "  dpx env decrypt .env.dpx --password <pass>")
+	fmt.Fprintln(w, "  dpx env list .env.dpx --password <pass>")
+	fmt.Fprintln(w, "  dpx env get .env.dpx --key API_KEY --password <pass>")
+	fmt.Fprintln(w, "  dpx env set .env --key API_KEY --value abc --encrypt --mode age")
+	fmt.Fprintln(w, "  dpx env updatekeys .env.dpx --recipient age1new...,age1team...")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Commands:")
 	fmt.Fprintln(w, "  init")
@@ -1609,18 +2344,25 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  encrypt (enc)")
 	fmt.Fprintln(w, "  decrypt (dec)")
 	fmt.Fprintln(w, "  inspect")
+	fmt.Fprintln(w, "  run")
+	fmt.Fprintln(w, "  policy (check)")
 	fmt.Fprintln(w, "  tui")
 	fmt.Fprintln(w, "  doctor")
 	fmt.Fprintln(w, "  uninstall")
-	fmt.Fprintln(w, "  env (encrypt|decrypt)")
+	fmt.Fprintln(w, "  env (encrypt|decrypt|list|get|set|updatekeys)")
 	fmt.Fprintln(w, "  version")
 	fmt.Fprintln(w, "  help")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Flags:")
 	fmt.Fprintln(w, "  --version, -v")
 	fmt.Fprintln(w, "  uninstall: --yes --remove-key --remove-encrypted")
+	fmt.Fprintln(w, "  run: [--file|-f] [--password] [--identity] -- <command>")
 	fmt.Fprintln(w, "  env encrypt: --mode --keys --recipient --password --out")
 	fmt.Fprintln(w, "  env decrypt: --password --identity --out")
+	fmt.Fprintln(w, "  env list: [file] [--password] [--identity]")
+	fmt.Fprintln(w, "  env get: [file] --key [--password] [--identity]")
+	fmt.Fprintln(w, "  env set: [file] --key --value [--encrypt --mode --recipient --password --out]")
+	fmt.Fprintln(w, "  env updatekeys: [file] --recipient [--keys] [--identity] [--out]")
 	fmt.Fprintln(w, "Notes:")
 	fmt.Fprintln(w, "  - Password prompts are interactive and require confirmation when encrypting")
 	fmt.Fprintln(w, "  - Omit file args to use guided picker/search flow")
