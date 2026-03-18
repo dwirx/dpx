@@ -769,6 +769,71 @@ func TestRunTUIImportsKeyFromFile(t *testing.T) {
 	}
 }
 
+func TestRunTUIImportKeyPastedAtFilePrompt(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	identity, err := agex.GenerateIdentity()
+	if err != nil {
+		t.Fatalf("generate identity: %v", err)
+	}
+	outPath := filepath.Join(dir, "imported-age-keys.txt")
+	input := strings.NewReader(strings.Join([]string{
+		"5", // Import Key
+		"1", // From file
+		"# created: 2026-03-17T18:14:43Z",
+		"# public key: " + identity.PublicKey,
+		identity.PrivateKey,
+		outPath,
+		"",
+	}, "\n"))
+	stdout := new(bytes.Buffer)
+
+	if err := run([]string{"tui"}, runOptions{
+		cwd:    dir,
+		stdin:  input,
+		stdout: stdout,
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("run tui import from pasted block at file prompt: %v", err)
+	}
+
+	data, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("read imported key file: %v", err)
+	}
+	if !strings.Contains(string(data), identity.PrivateKey) {
+		t.Fatalf("expected imported private key in output file")
+	}
+	if !strings.Contains(stdout.String(), "Imported key ->") {
+		t.Fatalf("expected import output message, got %q", stdout.String())
+	}
+}
+
+func TestShouldUseBubbleTUIForOSDisablesWindows(t *testing.T) {
+	t.Parallel()
+
+	opts := runOptions{
+		stdin:  os.Stdin,
+		stdout: os.Stdout,
+	}
+	if shouldUseBubbleTUIForOS(opts, "windows") {
+		t.Fatal("expected bubble TUI disabled on windows")
+	}
+}
+
+func TestShouldUseBubbleTUIForOSRequiresTTY(t *testing.T) {
+	t.Parallel()
+
+	opts := runOptions{
+		stdin:  strings.NewReader(""),
+		stdout: new(bytes.Buffer),
+	}
+	if shouldUseBubbleTUIForOS(opts, "linux") {
+		t.Fatal("expected bubble TUI disabled for non-tty streams")
+	}
+}
+
 func TestRunTUIDoctorAction(t *testing.T) {
 	t.Parallel()
 

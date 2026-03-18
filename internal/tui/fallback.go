@@ -216,11 +216,24 @@ func RunFallback(svc app.Service, cfg config.Config, cwd string, stdin io.Reader
 			if path == "" {
 				return fmt.Errorf("import file path is required")
 			}
-			data, err := os.ReadFile(expandHome(path))
-			if err != nil {
-				return err
+			if looksLikeAgeKeyInput(path) {
+				raw = path
+				if extractAgeSecretKey(raw) == "" {
+					tail, err := promptAgeKeyBlock(reader, stdout, "Continue pasting key block")
+					if err != nil {
+						return err
+					}
+					if strings.TrimSpace(tail) != "" {
+						raw = raw + "\n" + tail
+					}
+				}
+			} else {
+				data, err := os.ReadFile(expandHome(path))
+				if err != nil {
+					return err
+				}
+				raw = string(data)
 			}
-			raw = string(data)
 		} else {
 			raw, err = promptAgeKeyBlock(reader, stdout, "Paste key block")
 			if err != nil {
@@ -755,6 +768,17 @@ func promptAgeKeyBlock(reader *bufio.Reader, stdout io.Writer, label string) (st
 		}
 	}
 	return strings.TrimSpace(strings.Join(lines, "\n")), nil
+}
+
+func looksLikeAgeKeyInput(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return false
+	}
+	if strings.HasPrefix(trimmed, "#") {
+		return true
+	}
+	return strings.HasPrefix(trimmed, "AGE-SECRET-KEY-")
 }
 
 func promptPasswordWithConfirmation(reader *bufio.Reader, stdout io.Writer) ([]byte, error) {

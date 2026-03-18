@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -31,6 +32,7 @@ var version = "dev"
 var (
 	runSelfUpdate   = selfupdate.Update
 	runSelfRollback = selfupdate.Rollback
+	runtimeGOOS     = runtime.GOOS
 )
 
 const (
@@ -1689,16 +1691,30 @@ func chooseEnvKeys(opts runOptions, keys []string) ([]string, error) {
 }
 
 func runTUI(svc app.Service, cfg config.Config, opts runOptions) error {
+	if !shouldUseBubbleTUI(opts) {
+		return tui.RunFallback(svc, cfg, opts.cwd, opts.stdin, opts.stdout)
+	}
+	return tui.Run(svc, cfg, opts.cwd, opts.stdin, opts.stdout)
+}
+
+func shouldUseBubbleTUI(opts runOptions) bool {
+	return shouldUseBubbleTUIForOS(opts, runtimeGOOS)
+}
+
+func shouldUseBubbleTUIForOS(opts runOptions, goos string) bool {
+	if goos == "windows" {
+		return false
+	}
 	inFile, inTTY := opts.stdin.(*os.File)
 	outFile, outTTY := opts.stdout.(*os.File)
 	if inTTY && outTTY {
 		inFD, inOK := fileDescriptorInt(inFile)
 		outFD, outOK := fileDescriptorInt(outFile)
 		if inOK && outOK && term.IsTerminal(inFD) && term.IsTerminal(outFD) {
-			return tui.Run(svc, cfg, opts.cwd, opts.stdin, opts.stdout)
+			return true
 		}
 	}
-	return tui.RunFallback(svc, cfg, opts.cwd, opts.stdin, opts.stdout)
+	return false
 }
 
 func runDirectPathInvocation(svc app.Service, cfg config.Config, args []string, opts runOptions) error {

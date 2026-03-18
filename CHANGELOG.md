@@ -7,6 +7,17 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [v0.0.12] - 2026-03-19
+
+### Changed
+- `dpx tui` now forces fallback TUI on Windows to avoid multiline key-paste instability in fullscreen mode.
+
+### Fixed
+- Import key flow in fallback TUI now tolerates accidental paste at the `From file` prompt:
+  - if input looks like key-block content (`# ...` metadata or `AGE-SECRET-KEY-...`), it is parsed as key content instead of a filesystem path
+  - multiline key block can continue immediately and is merged safely before import
+- Added regression coverage for Windows fallback selection and pasted key-block import handling.
+
 ## [v0.0.11] - 2026-03-18
 
 ### Added

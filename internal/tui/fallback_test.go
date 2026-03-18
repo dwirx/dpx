@@ -70,3 +70,27 @@ func TestPromptAgeKeyBlockSupportsEndTerminator(t *testing.T) {
 		t.Fatalf("expected data after END to remain unread, got %q", next)
 	}
 }
+
+func TestLooksLikeAgeKeyInput(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{name: "comment metadata", in: "# created: 2026-03-17T18:14:43Z", want: true},
+		{name: "private key", in: "AGE-SECRET-KEY-1TESTSECRETKEY", want: true},
+		{name: "path", in: "/tmp/age-keys.txt", want: false},
+		{name: "blank", in: "   ", want: false},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := looksLikeAgeKeyInput(tc.in); got != tc.want {
+				t.Fatalf("looksLikeAgeKeyInput(%q)=%v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
