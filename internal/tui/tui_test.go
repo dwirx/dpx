@@ -12,6 +12,7 @@ import (
 
 	"github.com/dwirx/dpx/internal/app"
 	"github.com/dwirx/dpx/internal/config"
+	"github.com/dwirx/dpx/internal/crypto/agex"
 )
 
 func TestModelEncryptWithoutCandidatesPromptsManualPath(t *testing.T) {
@@ -280,6 +281,140 @@ func TestModelEnvInlineDecryptPasswordRequiresConfirmation(t *testing.T) {
 	menu = updated.(Model)
 	if menu.stage != stageEnvDecryptOutput {
 		t.Fatalf("expected env decrypt output stage, got %v", menu.stage)
+	}
+}
+
+func TestModelImportFromFilePrefillsOutputWithImportPath(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	identity, err := agex.GenerateIdentity()
+	if err != nil {
+		t.Fatalf("generate identity: %v", err)
+	}
+	importRaw := strings.Join([]string{
+		"# created: 2026-03-17T11:47:02Z",
+		"# public key: " + identity.PublicKey,
+		identity.PrivateKey,
+		"",
+	}, "\n")
+	importPath := filepath.Join(dir, "age-keys.txt")
+	if err := os.WriteFile(importPath, []byte(importRaw), 0o600); err != nil {
+		t.Fatalf("write import file: %v", err)
+	}
+
+	model, err := NewModel(app.New(config.Default()), config.Default(), dir, nil, io.Discard)
+	if err != nil {
+		t.Fatalf("new model: %v", err)
+	}
+
+	importIdx := optionIndex(model.options, "Import Key")
+	if importIdx < 0 {
+		t.Fatalf("missing Import Key option: %#v", model.options)
+	}
+	model.selection = importIdx
+	updated, _ := model.submitSelection()
+	menu := updated.(Model)
+	if menu.stage != stageImportSource {
+		t.Fatalf("expected import source stage, got %v", menu.stage)
+	}
+
+	menu.selection = 0 // From file
+	updated, _ = menu.submitSelection()
+	menu = updated.(Model)
+	if menu.stage != stageImportFilePath {
+		t.Fatalf("expected import file path stage, got %v", menu.stage)
+	}
+
+	menu.input.SetValue(importPath)
+	updated, _ = menu.submitInput()
+	menu = updated.(Model)
+	if menu.stage != stageImportOutput {
+		t.Fatalf("expected import output stage, got %v", menu.stage)
+	}
+	if menu.input.Value() != importPath {
+		t.Fatalf("expected output prefill %q, got %q", importPath, menu.input.Value())
+	}
+}
+
+func TestModelImportRawWaitsForAgeSecretKeyLine(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	model, err := NewModel(app.New(config.Default()), config.Default(), dir, nil, io.Discard)
+	if err != nil {
+		t.Fatalf("new model: %v", err)
+	}
+
+	importIdx := optionIndex(model.options, "Import Key")
+	if importIdx < 0 {
+		t.Fatalf("missing Import Key option: %#v", model.options)
+	}
+	model.selection = importIdx
+	updated, _ := model.submitSelection()
+	menu := updated.(Model)
+	if menu.stage != stageImportSource {
+		t.Fatalf("expected import source stage, got %v", menu.stage)
+	}
+
+	menu.selection = 1 // Paste private key
+	updated, _ = menu.submitSelection()
+	menu = updated.(Model)
+	if menu.stage != stageImportRaw {
+		t.Fatalf("expected import raw stage, got %v", menu.stage)
+	}
+
+	menu.input.SetValue("# created: 2026-03-17T18:14:43Z")
+	updated, _ = menu.submitInput()
+	menu = updated.(Model)
+	if menu.stage != stageImportRaw {
+		t.Fatalf("expected to stay in import raw stage until secret key line, got %v", menu.stage)
+	}
+	if !strings.Contains(strings.ToLower(menu.help), "age-secret-key") {
+		t.Fatalf("expected guidance mentioning AGE-SECRET-KEY, got %q", menu.help)
+	}
+}
+
+func TestModelImportRawAcceptsAgeKeysBlockText(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	identity, err := agex.GenerateIdentity()
+	if err != nil {
+		t.Fatalf("generate identity: %v", err)
+	}
+	model, err := NewModel(app.New(config.Default()), config.Default(), dir, nil, io.Discard)
+	if err != nil {
+		t.Fatalf("new model: %v", err)
+	}
+
+	importIdx := optionIndex(model.options, "Import Key")
+	if importIdx < 0 {
+		t.Fatalf("missing Import Key option: %#v", model.options)
+	}
+	model.selection = importIdx
+	updated, _ := model.submitSelection()
+	menu := updated.(Model)
+	menu.selection = 1 // Paste private key
+	updated, _ = menu.submitSelection()
+	menu = updated.(Model)
+	if menu.stage != stageImportRaw {
+		t.Fatalf("expected import raw stage, got %v", menu.stage)
+	}
+
+	block := strings.Join([]string{
+		"# created: 2026-03-17T18:14:43Z",
+		"# public key: " + identity.PublicKey,
+		identity.PrivateKey,
+	}, "\n")
+	menu.input.SetValue(block)
+	updated, _ = menu.submitInput()
+	menu = updated.(Model)
+	if menu.stage != stageImportOutput {
+		t.Fatalf("expected import output stage, got %v", menu.stage)
+	}
+	if menu.importRaw != identity.PrivateKey {
+		t.Fatalf("expected extracted private key %q, got %q", identity.PrivateKey, menu.importRaw)
 	}
 }
 

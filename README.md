@@ -389,7 +389,7 @@ Behavior:
 - fails if `.dpx.yaml` already exists
 - also fails if legacy `.dopx.yaml` already exists
 
-### `dpx keygen [--out <path>]`
+### `dpx keygen [--out <path>] [--regen] [--import-file <age-keys.txt>] [--import-stdin] [--no-config-update]`
 
 Generate an `age` identity file.
 
@@ -398,6 +398,21 @@ Default key path:
 ```text
 ~/.config/dpx/age-keys.txt
 ```
+
+Import existing `age` key file format (`age-keys.txt`):
+
+```text
+# created: 2026-03-17T18:14:43Z
+# public key: age1...
+AGE-SECRET-KEY-...
+```
+
+Rules:
+- `--import-file <path>` imports an existing key file and auto-syncs `.dpx.yaml`
+- if `--import-file` is used without `--out`, DPX uses the import path as `key_file`
+- imported public key is added to `age.recipients` automatically (unless already present)
+- `--import-stdin` reads the same format from stdin
+- `--no-config-update` skips `.dpx.yaml` sync
 
 ### `dpx uninstall [--yes] [--remove-key] [--remove-encrypted]`
 

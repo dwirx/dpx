@@ -222,10 +222,13 @@ func RunFallback(svc app.Service, cfg config.Config, cwd string, stdin io.Reader
 			}
 			raw = string(data)
 		} else {
-			raw, err = promptMultiline(reader, stdout, "Paste key block", "END")
+			raw, err = promptAgeKeyBlock(reader, stdout, "Paste key block")
 			if err != nil {
 				return err
 			}
+		}
+		if extractAgeSecretKey(raw) == "" {
+			return fmt.Errorf("no AGE-SECRET-KEY found in input")
 		}
 		out, err := prompt(reader, stdout, fmt.Sprintf("Output key path [%s]: ", cfg.KeyFile))
 		if err != nil {
@@ -723,6 +726,30 @@ func promptMultiline(reader *bufio.Reader, stdout io.Writer, label, terminator s
 			break
 		}
 		lines = append(lines, trimmed)
+		if err == io.EOF {
+			break
+		}
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n")), nil
+}
+
+func promptAgeKeyBlock(reader *bufio.Reader, stdout io.Writer, label string) (string, error) {
+	fmt.Fprintf(stdout, "%s (paste age-keys block; auto-stop at AGE-SECRET-KEY line or END):\n", label)
+	lines := make([]string, 0, 8)
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil && err != io.EOF {
+			return "", err
+		}
+		trimmed := strings.TrimRight(line, "\r\n")
+		token := strings.TrimSpace(trimmed)
+		if token == "END" {
+			break
+		}
+		lines = append(lines, trimmed)
+		if strings.HasPrefix(token, "AGE-SECRET-KEY-") {
+			break
+		}
 		if err == io.EOF {
 			break
 		}

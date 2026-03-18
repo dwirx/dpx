@@ -910,13 +910,23 @@ func (m Model) submitInput() (tea.Model, tea.Cmd) {
 			return m.fail(err)
 		}
 		m.importRaw = string(data)
-		m.setInput(stageImportOutput, "Output key path", m.cfg.KeyFile, false)
+		defaultOut := strings.TrimSpace(value)
+		if defaultOut == "" {
+			defaultOut = m.cfg.KeyFile
+		}
+		m.setInput(stageImportOutput, "Output key path", defaultOut, false)
 	case stageImportRaw:
 		if value == "" {
 			m.help = "Private key is required, q quits"
 			return m, nil
 		}
-		m.importRaw = value
+		privateKey := extractAgeSecretKey(value)
+		if privateKey == "" {
+			m.help = "No AGE-SECRET-KEY found. Paste AGE-SECRET-KEY-... or use From file, q quits"
+			m.input.SetValue("")
+			return m, nil
+		}
+		m.importRaw = privateKey
 		m.setInput(stageImportOutput, "Output key path", m.cfg.KeyFile, false)
 	case stageImportOutput:
 		message, err := importIdentityAndSyncConfig(m.svc, m.cwd, m.cfg, value, m.importRaw)
@@ -1441,6 +1451,17 @@ func parseEnvKeysInput(raw string, available []string) ([]string, error) {
 		selected = append(selected, key)
 	}
 	return selected, nil
+}
+
+func extractAgeSecretKey(raw string) string {
+	fields := strings.Fields(raw)
+	for _, field := range fields {
+		token := strings.Trim(field, "\"'`,")
+		if strings.HasPrefix(token, "AGE-SECRET-KEY-") {
+			return token
+		}
+	}
+	return ""
 }
 
 func fileDescriptorInt(file *os.File) (int, bool) {

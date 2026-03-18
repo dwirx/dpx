@@ -356,6 +356,7 @@ func isPathWithin(baseDir, targetPath string) bool {
 func runKeygen(svc app.Service, cfg config.Config, args []string, opts runOptions) error {
 	fs := flag.NewFlagSet("keygen", flag.ContinueOnError)
 	fs.SetOutput(opts.stderr)
+	outFlagProvided := hasLongFlag(args, "--out")
 	outPath := fs.String("out", cfg.KeyFile, "path to write private key")
 	regen := fs.Bool("regen", false, "regenerate key pair if key file already exists")
 	importFile := fs.String("import-file", "", "import identity from an existing age key file")
@@ -371,7 +372,11 @@ func runKeygen(svc app.Service, cfg config.Config, args []string, opts runOption
 		return fmt.Errorf("--regen cannot be combined with import flags")
 	}
 
-	keyPath := expandHome(*outPath)
+	selectedOutPath := *outPath
+	if *importFile != "" && !outFlagProvided {
+		selectedOutPath = *importFile
+	}
+	keyPath := expandHome(selectedOutPath)
 	var (
 		identity agex.Identity
 		err      error
@@ -424,7 +429,7 @@ func runKeygen(svc app.Service, cfg config.Config, args []string, opts runOption
 
 	var syncResult keygenConfigSyncResult
 	if !*noConfigUpdate {
-		syncResult, err = syncKeygenConfig(opts.cwd, *outPath, identity.PublicKey)
+		syncResult, err = syncKeygenConfig(opts.cwd, selectedOutPath, identity.PublicKey)
 		if err != nil {
 			return err
 		}
@@ -2178,6 +2183,15 @@ func containsString(items []string, value string) bool {
 	return false
 }
 
+func hasLongFlag(args []string, name string) bool {
+	for _, arg := range args {
+		if arg == name || strings.HasPrefix(arg, name+"=") {
+			return true
+		}
+	}
+	return false
+}
+
 type encryptArgs struct {
 	filePath       string
 	outPath        string
@@ -2392,6 +2406,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  dpx env get .env.dpx --key API_KEY --password <pass>")
 	fmt.Fprintln(w, "  dpx env set .env --key API_KEY --value abc --encrypt --mode age")
 	fmt.Fprintln(w, "  dpx env updatekeys .env.dpx --recipient age1new...,age1team...")
+	fmt.Fprintln(w, "  dpx keygen --import-file age-keys.txt")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Commands:")
 	fmt.Fprintln(w, "  init")
@@ -2411,6 +2426,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "Flags:")
 	fmt.Fprintln(w, "  --version, -v")
 	fmt.Fprintln(w, "  uninstall: --yes --remove-key --remove-encrypted")
+	fmt.Fprintln(w, "  keygen: [--out] [--regen] [--import-file] [--import-stdin] [--no-config-update]")
 	fmt.Fprintln(w, "  encrypt: [file] [--password] [--age] [--recipient] [--kdf-profile] [--out]")
 	fmt.Fprintln(w, "  run: [--file|-f] [--password] [--identity] -- <command>")
 	fmt.Fprintln(w, "  env encrypt: --mode --keys --recipient --password --kdf-profile --out")
