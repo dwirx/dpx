@@ -375,6 +375,92 @@ func TestModelImportRawWaitsForAgeSecretKeyLine(t *testing.T) {
 	}
 }
 
+func TestModelImportFromFileDetectsPastedKeyBlockStart(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	model, err := NewModel(app.New(config.Default()), config.Default(), dir, nil, io.Discard)
+	if err != nil {
+		t.Fatalf("new model: %v", err)
+	}
+
+	importIdx := optionIndex(model.options, "Import Key")
+	if importIdx < 0 {
+		t.Fatalf("missing Import Key option: %#v", model.options)
+	}
+	model.selection = importIdx
+	updated, _ := model.submitSelection()
+	menu := updated.(Model)
+	menu.selection = 0 // From file
+	updated, _ = menu.submitSelection()
+	menu = updated.(Model)
+	if menu.stage != stageImportFilePath {
+		t.Fatalf("expected import file path stage, got %v", menu.stage)
+	}
+
+	menu.input.SetValue("# created: 2026-03-17T18:14:43Z")
+	updated, _ = menu.submitInput()
+	menu = updated.(Model)
+	if menu.stage != stageImportRaw {
+		t.Fatalf("expected import raw stage after pasted key block start, got %v", menu.stage)
+	}
+	if menu.importBuffer == "" {
+		t.Fatal("expected import buffer to keep pasted metadata line")
+	}
+}
+
+func TestModelImportRawAcceptsLineByLinePaste(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	identity, err := agex.GenerateIdentity()
+	if err != nil {
+		t.Fatalf("generate identity: %v", err)
+	}
+	model, err := NewModel(app.New(config.Default()), config.Default(), dir, nil, io.Discard)
+	if err != nil {
+		t.Fatalf("new model: %v", err)
+	}
+
+	importIdx := optionIndex(model.options, "Import Key")
+	if importIdx < 0 {
+		t.Fatalf("missing Import Key option: %#v", model.options)
+	}
+	model.selection = importIdx
+	updated, _ := model.submitSelection()
+	menu := updated.(Model)
+	menu.selection = 1 // Paste private key
+	updated, _ = menu.submitSelection()
+	menu = updated.(Model)
+	if menu.stage != stageImportRaw {
+		t.Fatalf("expected import raw stage, got %v", menu.stage)
+	}
+
+	menu.input.SetValue("# created: 2026-03-17T18:14:43Z")
+	updated, _ = menu.submitInput()
+	menu = updated.(Model)
+	if menu.stage != stageImportRaw {
+		t.Fatalf("expected stay in import raw stage after metadata, got %v", menu.stage)
+	}
+
+	menu.input.SetValue("# public key: " + identity.PublicKey)
+	updated, _ = menu.submitInput()
+	menu = updated.(Model)
+	if menu.stage != stageImportRaw {
+		t.Fatalf("expected stay in import raw stage after public key, got %v", menu.stage)
+	}
+
+	menu.input.SetValue(identity.PrivateKey)
+	updated, _ = menu.submitInput()
+	menu = updated.(Model)
+	if menu.stage != stageImportOutput {
+		t.Fatalf("expected import output stage after secret key line, got %v", menu.stage)
+	}
+	if menu.importRaw != identity.PrivateKey {
+		t.Fatalf("expected extracted private key %q, got %q", identity.PrivateKey, menu.importRaw)
+	}
+}
+
 func TestModelImportRawAcceptsAgeKeysBlockText(t *testing.T) {
 	t.Parallel()
 

@@ -31,6 +31,7 @@ type UpdateOptions struct {
 	GOOS        string
 	GOARCH      string
 	HTTPClient  *http.Client
+	Progress    func(ProgressEvent)
 }
 
 type RollbackOptions struct {
@@ -44,6 +45,14 @@ type Result struct {
 	BackupPath  string
 	Version     string
 	Scheduled   bool
+}
+
+type ProgressEvent struct {
+	Stage      string
+	Message    string
+	Downloaded int64
+	Total      int64
+	Done       bool
 }
 
 func Update(opts UpdateOptions) (Result, error) {
@@ -61,11 +70,17 @@ func Update(opts UpdateOptions) (Result, error) {
 	}
 	backupPath := resolveBackupPath(currentPath, opts.BackupPath, goos)
 	version := normalizeVersion(opts.Version)
+	progress := opts.Progress
 
 	assetName, archiveKind, err := assetInfo(goos, goarch, defaultBinaryName)
 	if err != nil {
 		return Result{}, err
 	}
+	emitProgress(progress, ProgressEvent{
+		Stage:   "resolve",
+		Message: fmt.Sprintf("Resolving release asset (%s)", assetName),
+		Done:    true,
+	})
 	baseURL := resolveBaseURL(opts.BaseURL, version)
 	assetURL := strings.TrimRight(baseURL, "/") + "/" + assetName
 	checksumURL := strings.TrimRight(baseURL, "/") + "/checksums.txt"
@@ -75,27 +90,70 @@ func Update(opts UpdateOptions) (Result, error) {
 		httpClient = &http.Client{Timeout: 60 * time.Second}
 	}
 
-	assetData, err := download(httpClient, assetURL)
+	assetData, err := download(httpClient, assetURL, func(downloaded, total int64, done bool) {
+		emitProgress(progress, ProgressEvent{
+			Stage:      "download",
+			Message:    fmt.Sprintf("Downloading %s", assetName),
+			Downloaded: downloaded,
+			Total:      total,
+			Done:       done,
+		})
+	})
 	if err != nil {
 		return Result{}, err
 	}
+	emitProgress(progress, ProgressEvent{
+		Stage:   "verify",
+		Message: "Verifying checksums",
+		Done:    false,
+	})
 	if err := verifyChecksumIfAvailable(httpClient, checksumURL, assetName, assetData); err != nil {
 		return Result{}, err
 	}
+	emitProgress(progress, ProgressEvent{
+		Stage:   "verify",
+		Message: "Verifying checksums",
+		Done:    true,
+	})
 
 	binaryName := defaultBinaryName
 	if goos == "windows" {
 		binaryName = defaultBinaryName + ".exe"
 	}
+	emitProgress(progress, ProgressEvent{
+		Stage:   "extract",
+		Message: fmt.Sprintf("Extracting %s", binaryName),
+		Done:    false,
+	})
 	binaryData, err := extractBinary(assetData, archiveKind, binaryName)
 	if err != nil {
 		return Result{}, err
 	}
+	emitProgress(progress, ProgressEvent{
+		Stage:   "extract",
+		Message: fmt.Sprintf("Extracting %s", binaryName),
+		Done:    true,
+	})
 
 	if goos == "windows" {
+		emitProgress(progress, ProgressEvent{
+			Stage:   "schedule",
+			Message: "Scheduling Windows binary replacement",
+			Done:    false,
+		})
 		if err := scheduleWindowsReplace(currentPath, backupPath, binaryData); err != nil {
 			return Result{}, err
 		}
+		emitProgress(progress, ProgressEvent{
+			Stage:   "schedule",
+			Message: "Scheduling Windows binary replacement",
+			Done:    true,
+		})
+		emitProgress(progress, ProgressEvent{
+			Stage:   "done",
+			Message: "Update scheduled",
+			Done:    true,
+		})
 		return Result{
 			CurrentPath: currentPath,
 			BackupPath:  backupPath,
@@ -104,9 +162,24 @@ func Update(opts UpdateOptions) (Result, error) {
 		}, nil
 	}
 
+	emitProgress(progress, ProgressEvent{
+		Stage:   "install",
+		Message: "Replacing current binary",
+		Done:    false,
+	})
 	if err := replaceBinaryAtomic(currentPath, backupPath, binaryData); err != nil {
 		return Result{}, err
 	}
+	emitProgress(progress, ProgressEvent{
+		Stage:   "install",
+		Message: "Replacing current binary",
+		Done:    true,
+	})
+	emitProgress(progress, ProgressEvent{
+		Stage:   "done",
+		Message: "Update completed",
+		Done:    true,
+	})
 	return Result{
 		CurrentPath: currentPath,
 		BackupPath:  backupPath,
@@ -229,7 +302,7 @@ func versionOrLatest(version string) string {
 	return version
 }
 
-func download(client *http.Client, rawURL string) ([]byte, error) {
+func download(client *http.Client, rawURL string, onProgress func(downloaded, total int64, done bool)) ([]byte, error) {
 	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, err
@@ -243,11 +316,39 @@ func download(client *http.Client, rawURL string) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("download %s failed: HTTP %d", rawURL, resp.StatusCode)
 	}
-	return io.ReadAll(resp.Body)
+	total := resp.ContentLength
+	if onProgress != nil {
+		onProgress(0, total, false)
+	}
+	buffer := bytes.NewBuffer(nil)
+	chunk := make([]byte, 32*1024)
+	var downloaded int64
+	for {
+		n, readErr := resp.Body.Read(chunk)
+		if n > 0 {
+			if _, err := buffer.Write(chunk[:n]); err != nil {
+				return nil, err
+			}
+			downloaded += int64(n)
+			if onProgress != nil {
+				onProgress(downloaded, total, false)
+			}
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			return nil, readErr
+		}
+	}
+	if onProgress != nil {
+		onProgress(downloaded, total, true)
+	}
+	return buffer.Bytes(), nil
 }
 
 func verifyChecksumIfAvailable(client *http.Client, checksumURL, assetName string, assetData []byte) error {
-	checksumData, err := download(client, checksumURL)
+	checksumData, err := download(client, checksumURL, nil)
 	if err != nil {
 		return nil
 	}
@@ -434,6 +535,13 @@ func scheduleWindowsRollback(currentPath, backupPath string) error {
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	return cmd.Start()
+}
+
+func emitProgress(handler func(ProgressEvent), event ProgressEvent) {
+	if handler == nil {
+		return
+	}
+	handler(event)
 }
 
 func windowsEscape(path string) string {

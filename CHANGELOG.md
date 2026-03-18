@@ -7,6 +7,23 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [v0.0.13] - 2026-03-19
+
+### Added
+- `dpx update` now emits progress events and renders a terminal download progress bar while fetching release assets.
+
+### Changed
+- Windows can now run fullscreen Bubble Tea TUI when terminal is interactive (TTY), matching Linux/macOS experience.
+- Added `DPX_TUI_MODE` override:
+  - `fallback`/`plain` forces text fallback TUI
+  - `fullscreen`/`bubble` keeps fullscreen TUI when TTY is available
+
+### Fixed
+- Fullscreen TUI import flow now handles key-block paste better:
+  - detects accidental key-block paste in `From file` input
+  - supports line-by-line key-block paste with `Ctrl+D` finalize
+- Improved TUI navigation ergonomics with additional keys (`Tab`, `Shift+Tab`, `Ctrl+N`, `Ctrl+P`, `Home/End`, `Ctrl+B` back).
+
 ## [v0.0.12] - 2026-03-19
 
 ### Changed

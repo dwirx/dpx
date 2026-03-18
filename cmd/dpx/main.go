@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/term"
 
@@ -338,10 +339,15 @@ func runUpdate(args []string, opts runOptions) error {
 		return err
 	}
 	baseURL := strings.TrimSpace(os.Getenv("DPX_UPDATE_BASE_URL"))
+	progress := newUpdateProgressRenderer(opts.stdout)
 	result, err := runSelfUpdate(selfupdate.UpdateOptions{
 		Version: parsed.version,
 		BaseURL: baseURL,
+		Progress: func(event selfupdate.ProgressEvent) {
+			progress.Handle(event)
+		},
 	})
+	progress.Finish()
 	if err != nil {
 		return err
 	}
@@ -353,6 +359,119 @@ func runUpdate(args []string, opts runOptions) error {
 	fmt.Fprintf(opts.stdout, "Updated dpx (%s) at %s\n", result.Version, result.CurrentPath)
 	fmt.Fprintf(opts.stdout, "Backup: %s\n", result.BackupPath)
 	return nil
+}
+
+type updateProgressRenderer struct {
+	out        io.Writer
+	tty        bool
+	activeBar  bool
+	lastRender time.Time
+}
+
+func newUpdateProgressRenderer(out io.Writer) *updateProgressRenderer {
+	renderer := &updateProgressRenderer{out: out}
+	if file, ok := out.(*os.File); ok {
+		if fd, fdOK := fileDescriptorInt(file); fdOK && term.IsTerminal(fd) {
+			renderer.tty = true
+		}
+	}
+	return renderer
+}
+
+func (r *updateProgressRenderer) Handle(event selfupdate.ProgressEvent) {
+	if r == nil || r.out == nil {
+		return
+	}
+	if event.Stage == "download" {
+		r.renderDownload(event)
+		return
+	}
+	if !event.Done && strings.TrimSpace(event.Message) != "" {
+		if r.activeBar {
+			fmt.Fprint(r.out, "\n")
+			r.activeBar = false
+		}
+		if !r.tty {
+			fmt.Fprintf(r.out, "%s...\n", event.Message)
+		}
+	}
+}
+
+func (r *updateProgressRenderer) Finish() {
+	if r == nil || r.out == nil {
+		return
+	}
+	if r.activeBar {
+		fmt.Fprint(r.out, "\n")
+		r.activeBar = false
+	}
+}
+
+func (r *updateProgressRenderer) renderDownload(event selfupdate.ProgressEvent) {
+	if r.out == nil {
+		return
+	}
+	if !r.tty {
+		if event.Done {
+			fmt.Fprintf(r.out, "Downloading update... done (%s)\n", formatBinaryBytes(event.Downloaded))
+		}
+		return
+	}
+	now := time.Now()
+	if !event.Done && !r.lastRender.IsZero() && now.Sub(r.lastRender) < 70*time.Millisecond {
+		return
+	}
+	r.lastRender = now
+	line := formatUpdateProgressBar(event.Downloaded, event.Total)
+	fmt.Fprintf(r.out, "\r%-96s", line)
+	r.activeBar = true
+	if event.Done {
+		fmt.Fprint(r.out, "\n")
+		r.activeBar = false
+	}
+}
+
+func formatUpdateProgressBar(downloaded, total int64) string {
+	const width = 28
+	if total <= 0 {
+		return fmt.Sprintf("Downloading update %s", formatBinaryBytes(downloaded))
+	}
+	if downloaded < 0 {
+		downloaded = 0
+	}
+	if downloaded > total {
+		downloaded = total
+	}
+	percent := float64(downloaded) / float64(total)
+	filled := int(percent * float64(width))
+	if filled < 0 {
+		filled = 0
+	}
+	if filled > width {
+		filled = width
+	}
+	bar := strings.Repeat("#", filled) + strings.Repeat("-", width-filled)
+	return fmt.Sprintf("Downloading update [%s] %3d%% (%s/%s)", bar, int(percent*100), formatBinaryBytes(downloaded), formatBinaryBytes(total))
+}
+
+func formatBinaryBytes(n int64) string {
+	if n < 0 {
+		n = 0
+	}
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for value := n / unit; value >= unit; value /= unit {
+		div *= unit
+		exp++
+	}
+	suffix := []string{"KiB", "MiB", "GiB", "TiB"}
+	if exp >= len(suffix) {
+		exp = len(suffix) - 1
+	}
+	return fmt.Sprintf("%.1f %s", float64(n)/float64(div), suffix[exp])
 }
 
 func runRollback(args []string, opts runOptions) error {
@@ -1702,7 +1821,9 @@ func shouldUseBubbleTUI(opts runOptions) bool {
 }
 
 func shouldUseBubbleTUIForOS(opts runOptions, goos string) bool {
-	if goos == "windows" {
+	_ = goos
+	mode := strings.ToLower(strings.TrimSpace(os.Getenv("DPX_TUI_MODE")))
+	if mode == "fallback" || mode == "plain" {
 		return false
 	}
 	inFile, inTTY := opts.stdin.(*os.File)
@@ -2541,6 +2662,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "Notes:")
 	fmt.Fprintln(w, "  - update/rollback use local binary backup file (.rollback)")
 	fmt.Fprintln(w, "  - optional env DPX_UPDATE_BASE_URL overrides release asset base URL")
+	fmt.Fprintln(w, "  - optional env DPX_TUI_MODE=fallback|fullscreen controls TUI mode")
 	fmt.Fprintln(w, "  - Password prompts are interactive and require confirmation when encrypting")
 	fmt.Fprintln(w, "  - Password mode supports --kdf-profile balanced|hardened|paranoid")
 	fmt.Fprintln(w, "  - Omit file args to use guided picker/search flow")

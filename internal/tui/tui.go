@@ -111,6 +111,7 @@ type navSnapshot struct {
 	envHasAge     bool
 	envHasPwd     bool
 	importRaw     string
+	importBuffer  string
 }
 
 type Model struct {
@@ -147,6 +148,7 @@ type Model struct {
 	envHasAge     bool
 	envHasPwd     bool
 	importRaw     string
+	importBuffer  string
 	history       []navSnapshot
 }
 
@@ -299,7 +301,7 @@ func (m Model) isInputStage() bool {
 
 func (m Model) updateMenu(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "esc":
+	case "esc", "ctrl+b":
 		if m.goBack() {
 			return m, nil
 		}
@@ -312,6 +314,31 @@ func (m Model) updateMenu(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "down", "j":
 		if m.selection < len(m.options)-1 {
 			m.selection++
+		}
+		return m, nil
+	case "tab", "ctrl+n":
+		if len(m.options) == 0 {
+			return m, nil
+		}
+		m.selection = (m.selection + 1) % len(m.options)
+		return m, nil
+	case "shift+tab", "ctrl+p":
+		if len(m.options) == 0 {
+			return m, nil
+		}
+		m.selection--
+		if m.selection < 0 {
+			m.selection = len(m.options) - 1
+		}
+		return m, nil
+	case "home", "g":
+		if len(m.options) > 0 {
+			m.selection = 0
+		}
+		return m, nil
+	case "end", "G":
+		if len(m.options) > 0 {
+			m.selection = len(m.options) - 1
 		}
 		return m, nil
 	case "enter":
@@ -328,11 +355,14 @@ func (m Model) updateMenu(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if msg.String() == "esc" {
+	if msg.String() == "esc" || msg.String() == "ctrl+b" {
 		if m.goBack() {
 			return m, nil
 		}
 		return m, nil
+	}
+	if m.stage == stageImportRaw && msg.String() == "ctrl+d" {
+		return m.finalizeImportRawInput()
 	}
 	if msg.String() == "ctrl+v" && m.togglePasswordVisibility() {
 		return m, nil
@@ -563,9 +593,13 @@ func (m Model) submitSelection() (tea.Model, tea.Cmd) {
 		return m.showInspectResult(selected)
 	case stageImportSource:
 		if selected == "From file" {
+			m.importBuffer = ""
+			m.importRaw = ""
 			m.setInput(stageImportFilePath, "Path to age key file", "", false)
 		} else {
-			m.setInput(stageImportRaw, "Private key (AGE-SECRET-KEY-...)", "", true)
+			m.importBuffer = ""
+			m.importRaw = ""
+			m.setInput(stageImportRaw, "Paste key block line (AGE-SECRET-KEY-...)", "", false)
 		}
 	}
 	return m, nil
@@ -905,29 +939,39 @@ func (m Model) submitInput() (tea.Model, tea.Cmd) {
 			m.help = "Import file path is required, q quits"
 			return m, nil
 		}
+		if looksLikeAgeKeyInput(value) {
+			m.importBuffer = value
+			privateKey := extractAgeSecretKey(m.importBuffer)
+			if privateKey != "" {
+				m.importRaw = privateKey
+				m.setInput(stageImportOutput, "Output key path", m.cfg.KeyFile, false)
+				return m, nil
+			}
+			m.setInput(stageImportRaw, "Continue key block paste", "", false)
+			m.help = "Detected key block. Continue paste line-by-line, Enter per line, Ctrl+D finish, Esc back, q quits"
+			return m, nil
+		}
 		data, err := os.ReadFile(expandHome(value))
 		if err != nil {
 			return m.fail(err)
 		}
 		m.importRaw = string(data)
+		m.importBuffer = m.importRaw
 		defaultOut := strings.TrimSpace(value)
 		if defaultOut == "" {
 			defaultOut = m.cfg.KeyFile
 		}
 		m.setInput(stageImportOutput, "Output key path", defaultOut, false)
 	case stageImportRaw:
-		if value == "" {
-			m.help = "Private key is required, q quits"
-			return m, nil
+		line := strings.TrimSpace(rawValue)
+		if line != "" {
+			if m.importBuffer == "" {
+				m.importBuffer = line
+			} else {
+				m.importBuffer += "\n" + line
+			}
 		}
-		privateKey := extractAgeSecretKey(value)
-		if privateKey == "" {
-			m.help = "No AGE-SECRET-KEY found. Paste AGE-SECRET-KEY-... or use From file, q quits"
-			m.input.SetValue("")
-			return m, nil
-		}
-		m.importRaw = privateKey
-		m.setInput(stageImportOutput, "Output key path", m.cfg.KeyFile, false)
+		return m.finalizeImportRawInput()
 	case stageImportOutput:
 		message, err := importIdentityAndSyncConfig(m.svc, m.cwd, m.cfg, value, m.importRaw)
 		if err != nil {
@@ -943,6 +987,24 @@ func (m Model) submitInput() (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 	}
+	return m, nil
+}
+
+func (m Model) finalizeImportRawInput() (tea.Model, tea.Cmd) {
+	raw := strings.TrimSpace(m.importBuffer)
+	if raw == "" {
+		m.help = "Paste key block lines (metadata/private key), Enter per line, Ctrl+D finish, Esc back, q quits"
+		m.input.SetValue("")
+		return m, nil
+	}
+	privateKey := extractAgeSecretKey(raw)
+	if privateKey == "" {
+		m.help = "No AGE-SECRET-KEY found yet. Continue paste, Enter per line, Ctrl+D finish, Esc back, q quits"
+		m.input.SetValue("")
+		return m, nil
+	}
+	m.importRaw = privateKey
+	m.setInput(stageImportOutput, "Output key path", m.cfg.KeyFile, false)
 	return m, nil
 }
 
@@ -1061,7 +1123,7 @@ func (m *Model) setInput(next stage, title, value string, password bool) {
 func (m *Model) applyMenu(next stage, title string, options []string) {
 	m.stage = next
 	m.title = title
-	m.help = "1-9 choose, Enter confirm, arrow keys move, Esc back, q quits"
+	m.help = "1-9 choose, Enter confirm, arrows/jk/Tab move, Esc/Ctrl+B back, q quits"
 	m.options = append([]string{}, options...)
 	m.selection = 0
 }
@@ -1078,12 +1140,14 @@ func (m *Model) applyInput(next stage, title, value string, password bool) {
 	}
 	m.stage = next
 	m.title = title
-	if next == stageEncryptSearchQuery {
+	if next == stageImportRaw {
+		m.help = "Paste key block line-by-line, Enter per line, Ctrl+D finish, Esc/Ctrl+B back, q quits"
+	} else if next == stageEncryptSearchQuery {
 		m.help = "Type to search in realtime, Enter applies filter, Esc back, q quits"
 	} else if password {
 		m.help = "Type and press Enter, Ctrl+V toggles show/hide, Esc back, q quits"
 	} else {
-		m.help = "Type and press Enter to continue, Esc back, q quits"
+		m.help = "Type and press Enter to continue, Esc/Ctrl+B back, q quits"
 	}
 	m.input = input
 	if next == stageEncryptSearchQuery {
@@ -1116,8 +1180,7 @@ func (m Model) isPasswordInputStage() bool {
 		stageEnvDecryptPassword,
 		stageEnvDecryptPasswordConfirm,
 		stageEnvSetPassword,
-		stageEnvSetPasswordConfirm,
-		stageImportRaw:
+		stageEnvSetPasswordConfirm:
 		return true
 	default:
 		return false
@@ -1149,6 +1212,7 @@ func (m *Model) pushHistory() {
 		envHasAge:     m.envHasAge,
 		envHasPwd:     m.envHasPwd,
 		importRaw:     m.importRaw,
+		importBuffer:  m.importBuffer,
 	}
 	m.history = append(m.history, snapshot)
 }
@@ -1182,6 +1246,7 @@ func (m *Model) goBack() bool {
 	m.envHasAge = last.envHasAge
 	m.envHasPwd = last.envHasPwd
 	m.importRaw = last.importRaw
+	m.importBuffer = last.importBuffer
 	m.result = ""
 	m.err = nil
 	return true

@@ -149,6 +149,51 @@ func TestRunUpdateCommandUsesUpdater(t *testing.T) {
 	}
 }
 
+func TestRunUpdateCommandShowsProgressOnNonTTY(t *testing.T) {
+	oldUpdate := runSelfUpdate
+	t.Cleanup(func() {
+		runSelfUpdate = oldUpdate
+	})
+
+	runSelfUpdate = func(opts selfupdate.UpdateOptions) (selfupdate.Result, error) {
+		if opts.Progress == nil {
+			t.Fatal("expected update progress callback")
+		}
+		opts.Progress(selfupdate.ProgressEvent{
+			Stage:      "download",
+			Message:    "Downloading",
+			Downloaded: 2048,
+			Total:      4096,
+			Done:       false,
+		})
+		opts.Progress(selfupdate.ProgressEvent{
+			Stage:      "download",
+			Message:    "Downloading",
+			Downloaded: 4096,
+			Total:      4096,
+			Done:       true,
+		})
+		return selfupdate.Result{
+			CurrentPath: "/tmp/dpx",
+			BackupPath:  "/tmp/dpx.rollback",
+			Version:     "v1.2.3",
+		}, nil
+	}
+
+	stdout := new(bytes.Buffer)
+	if err := run([]string{"update", "--version", "v1.2.3"}, runOptions{
+		cwd:    t.TempDir(),
+		stdin:  strings.NewReader(""),
+		stdout: stdout,
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("run update: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "Downloading update... done") {
+		t.Fatalf("expected non-tty progress output, got %q", stdout.String())
+	}
+}
+
 func TestRunRollbackCommandUsesRollbacker(t *testing.T) {
 	oldRollback := runSelfRollback
 	t.Cleanup(func() {
@@ -810,15 +855,21 @@ func TestRunTUIImportKeyPastedAtFilePrompt(t *testing.T) {
 	}
 }
 
-func TestShouldUseBubbleTUIForOSDisablesWindows(t *testing.T) {
-	t.Parallel()
+func TestShouldUseBubbleTUIForOSRespectsFallbackOverride(t *testing.T) {
+	oldMode := os.Getenv("DPX_TUI_MODE")
+	if err := os.Setenv("DPX_TUI_MODE", "fallback"); err != nil {
+		t.Fatalf("setenv DPX_TUI_MODE: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Setenv("DPX_TUI_MODE", oldMode)
+	})
 
 	opts := runOptions{
 		stdin:  os.Stdin,
 		stdout: os.Stdout,
 	}
-	if shouldUseBubbleTUIForOS(opts, "windows") {
-		t.Fatal("expected bubble TUI disabled on windows")
+	if shouldUseBubbleTUIForOS(opts, "linux") {
+		t.Fatal("expected bubble TUI disabled when DPX_TUI_MODE=fallback")
 	}
 }
 

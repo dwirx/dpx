@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -34,6 +35,50 @@ func TestAssetInfo(t *testing.T) {
 	}
 	if asset != "dpx_windows_arm64.zip" || kind != "zip" {
 		t.Fatalf("unexpected asset info: %q %q", asset, kind)
+	}
+}
+
+func TestDownloadReportsProgress(t *testing.T) {
+	t.Parallel()
+
+	payload := bytes.Repeat([]byte("x"), 96*1024+17)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
+		_, _ = w.Write(payload)
+	}))
+	defer server.Close()
+
+	var (
+		sawProgress bool
+		finalBytes  int64
+		finalTotal  int64
+		doneEvents  int
+	)
+	data, err := download(http.DefaultClient, server.URL, func(downloaded, total int64, done bool) {
+		sawProgress = true
+		finalBytes = downloaded
+		finalTotal = total
+		if done {
+			doneEvents++
+		}
+	})
+	if err != nil {
+		t.Fatalf("download: %v", err)
+	}
+	if !bytes.Equal(data, payload) {
+		t.Fatal("downloaded payload mismatch")
+	}
+	if !sawProgress {
+		t.Fatal("expected progress callback to be invoked")
+	}
+	if finalBytes != int64(len(payload)) {
+		t.Fatalf("expected final downloaded %d, got %d", len(payload), finalBytes)
+	}
+	if finalTotal != int64(len(payload)) {
+		t.Fatalf("expected total %d, got %d", len(payload), finalTotal)
+	}
+	if doneEvents == 0 {
+		t.Fatal("expected at least one done progress event")
 	}
 }
 

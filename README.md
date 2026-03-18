@@ -183,6 +183,12 @@ The TUI can:
 - prompt for recipients or password (+ confirmation when encrypting)
 - apply `hardened` KDF profile by default for password-based encryption flows
 - confirm output path
+- import age key from file or paste key-block (supports line-by-line paste + `Ctrl+D` finalize)
+
+Windows note:
+- DPX uses fullscreen TUI on Windows when stdin/stdout are TTY.
+- For troubleshooting, force fallback text TUI with `DPX_TUI_MODE=fallback`.
+- If needed, force fullscreen mode with `DPX_TUI_MODE=fullscreen`.
 
 ## 🧭 Common Usage
 
@@ -279,6 +285,8 @@ Update to latest release:
 ```bash
 dpx update
 ```
+
+DPX shows a download progress bar while fetching release assets.
 
 Update to a specific version:
 
