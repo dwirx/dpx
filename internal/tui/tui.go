@@ -187,7 +187,11 @@ func (m Model) Init() tea.Cmd { return textinput.Blink }
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		if msg.String() == "ctrl+c" || msg.String() == "q" {
+		if msg.String() == "ctrl+c" {
+			return m, tea.Quit
+		}
+		// Allow typing/pasting "q" inside input fields (e.g. age public keys).
+		if msg.String() == "q" && !m.isInputStage() {
 			return m, tea.Quit
 		}
 		if m.stage == stageResult {

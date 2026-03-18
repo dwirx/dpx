@@ -461,6 +461,39 @@ func TestModelImportRawAcceptsLineByLinePaste(t *testing.T) {
 	}
 }
 
+func TestModelImportRawAllowsTypingQWithoutQuit(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	model, err := NewModel(app.New(config.Default()), config.Default(), dir, nil, io.Discard)
+	if err != nil {
+		t.Fatalf("new model: %v", err)
+	}
+
+	importIdx := optionIndex(model.options, "Import Key")
+	if importIdx < 0 {
+		t.Fatalf("missing Import Key option: %#v", model.options)
+	}
+	model.selection = importIdx
+	updated, _ := model.submitSelection()
+	menu := updated.(Model)
+	menu.selection = 1 // Paste private key
+	updated, _ = menu.submitSelection()
+	menu = updated.(Model)
+	if menu.stage != stageImportRaw {
+		t.Fatalf("expected import raw stage, got %v", menu.stage)
+	}
+
+	updatedModel, _ := menu.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	got := updatedModel.(Model)
+	if got.stage != stageImportRaw {
+		t.Fatalf("expected stay in import raw stage, got %v", got.stage)
+	}
+	if got.input.Value() != "q" {
+		t.Fatalf("expected input value to keep typed 'q', got %q", got.input.Value())
+	}
+}
+
 func TestModelImportRawAcceptsAgeKeysBlockText(t *testing.T) {
 	t.Parallel()
 

@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [v0.0.14] - 2026-03-19
+
+### Fixed
+- Fullscreen TUI no longer exits when typing/pasting `q` inside input fields.
+- Windows import-key paste flow is now stable for age key blocks containing `q` in the public key line.
+- Added regression test to ensure `q` is treated as text input (not global quit) during key import input stages.
+
 ## [v0.0.13] - 2026-03-19
 
 ### Added
