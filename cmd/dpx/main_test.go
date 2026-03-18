@@ -12,6 +12,7 @@ import (
 	"github.com/dwirx/dpx/internal/config"
 	"github.com/dwirx/dpx/internal/crypto/agex"
 	"github.com/dwirx/dpx/internal/envelope"
+	"github.com/dwirx/dpx/internal/selfupdate"
 )
 
 func TestDPXHelperPrintEnv(t *testing.T) {
@@ -98,11 +99,100 @@ func TestRunHelpListsVersionCommand(t *testing.T) {
 	if got := stdout.String(); !strings.Contains(got, "uninstall") {
 		t.Fatalf("expected help to mention uninstall command, got %q", got)
 	}
+	if got := stdout.String(); !strings.Contains(got, "update") {
+		t.Fatalf("expected help to mention update command, got %q", got)
+	}
+	if got := stdout.String(); !strings.Contains(got, "rollback") {
+		t.Fatalf("expected help to mention rollback command, got %q", got)
+	}
 	if got := stdout.String(); !strings.Contains(got, "dpx uninstall --yes --remove-key --remove-encrypted") {
 		t.Fatalf("expected help to include uninstall usage example, got %q", got)
 	}
 	if got := stdout.String(); !strings.Contains(got, "dpx <command> [flags]") {
 		t.Fatalf("expected dpx branding in help, got %q", got)
+	}
+}
+
+func TestRunUpdateCommandUsesUpdater(t *testing.T) {
+	oldUpdate := runSelfUpdate
+	t.Cleanup(func() {
+		runSelfUpdate = oldUpdate
+	})
+
+	called := false
+	runSelfUpdate = func(opts selfupdate.UpdateOptions) (selfupdate.Result, error) {
+		called = true
+		if opts.Version != "v1.2.3" {
+			t.Fatalf("expected version v1.2.3, got %q", opts.Version)
+		}
+		return selfupdate.Result{
+			CurrentPath: "/tmp/dpx",
+			BackupPath:  "/tmp/dpx.rollback",
+			Version:     "v1.2.3",
+		}, nil
+	}
+
+	stdout := new(bytes.Buffer)
+	if err := run([]string{"update", "--version", "v1.2.3"}, runOptions{
+		cwd:    t.TempDir(),
+		stdin:  strings.NewReader(""),
+		stdout: stdout,
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("run update: %v", err)
+	}
+	if !called {
+		t.Fatal("expected updater to be called")
+	}
+	if !strings.Contains(stdout.String(), "Updated dpx (v1.2.3)") {
+		t.Fatalf("expected update success output, got %q", stdout.String())
+	}
+}
+
+func TestRunRollbackCommandUsesRollbacker(t *testing.T) {
+	oldRollback := runSelfRollback
+	t.Cleanup(func() {
+		runSelfRollback = oldRollback
+	})
+
+	called := false
+	runSelfRollback = func(opts selfupdate.RollbackOptions) (selfupdate.Result, error) {
+		called = true
+		return selfupdate.Result{
+			CurrentPath: "/tmp/dpx",
+			BackupPath:  "/tmp/dpx.rollback",
+		}, nil
+	}
+
+	stdout := new(bytes.Buffer)
+	if err := run([]string{"rollback"}, runOptions{
+		cwd:    t.TempDir(),
+		stdin:  strings.NewReader(""),
+		stdout: stdout,
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("run rollback: %v", err)
+	}
+	if !called {
+		t.Fatal("expected rollbacker to be called")
+	}
+	if !strings.Contains(stdout.String(), "Rollback completed.") {
+		t.Fatalf("expected rollback success output, got %q", stdout.String())
+	}
+}
+
+func TestRunRollbackRejectsUnexpectedArg(t *testing.T) {
+	err := run([]string{"rollback", "extra"}, runOptions{
+		cwd:    t.TempDir(),
+		stdin:  strings.NewReader(""),
+		stdout: new(bytes.Buffer),
+		stderr: new(bytes.Buffer),
+	})
+	if err == nil {
+		t.Fatal("expected rollback arg validation error")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "unexpected argument") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

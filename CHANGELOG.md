@@ -7,11 +7,18 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [v0.0.11] - 2026-03-18
+
 ### Added
 - `keygen` help/docs now document key import workflow:
   - `--import-file`
   - `--import-stdin`
   - `.dpx.yaml` auto-sync behavior
+- New self-update commands:
+  - `dpx update`
+  - `dpx update --version vX.Y.Z`
+  - `dpx rollback`
+- Cross-platform update asset resolution for Linux/macOS/Windows with rollback backup support.
 
 ### Changed
 - `dpx keygen --import-file <age-keys.txt>` now uses the import file path as default output when `--out` is omitted.
@@ -22,6 +29,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   - waits for `AGE-SECRET-KEY-...` in Bubble Tea input before proceeding
   - fallback TUI auto-stops pasted block at the private-key line (no mandatory `END`)
   - clearer validation when no private key line is found
+- Import parser now tolerates noisy shell paste artifacts and extracts the first valid `AGE-SECRET-KEY-...` token.
 
 ## [v0.0.9] - 2026-03-18
 

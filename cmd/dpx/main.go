@@ -22,10 +22,16 @@ import (
 	"github.com/dwirx/dpx/internal/envelope"
 	"github.com/dwirx/dpx/internal/policy"
 	"github.com/dwirx/dpx/internal/safeio"
+	"github.com/dwirx/dpx/internal/selfupdate"
 	"github.com/dwirx/dpx/internal/tui"
 )
 
 var version = "dev"
+
+var (
+	runSelfUpdate   = selfupdate.Update
+	runSelfRollback = selfupdate.Rollback
+)
 
 const (
 	appName          = "dpx"
@@ -122,6 +128,10 @@ func run(args []string, opts runOptions) error {
 		return runDoctor(opts)
 	case "uninstall":
 		return runUninstall(args[1:], opts)
+	case "update":
+		return runUpdate(args[1:], opts)
+	case "rollback":
+		return runRollback(args[1:], opts)
 	case "policy":
 		return runPolicy(args[1:], opts)
 	}
@@ -190,6 +200,10 @@ type uninstallArgs struct {
 	yes             bool
 	removeKey       bool
 	removeEncrypted bool
+}
+
+type updateArgs struct {
+	version string
 }
 
 func parseUninstallArgs(args []string, opts runOptions) (uninstallArgs, error) {
@@ -288,6 +302,71 @@ func runUninstall(args []string, opts runOptions) error {
 	for _, path := range removed {
 		fmt.Fprintf(opts.stdout, "  - %s\n", path)
 	}
+	return nil
+}
+
+func parseUpdateArgs(args []string, opts runOptions) (updateArgs, error) {
+	fs := flag.NewFlagSet("update", flag.ContinueOnError)
+	fs.SetOutput(opts.stderr)
+	version := fs.String("version", "", "target release version (for example v1.2.3)")
+	if err := fs.Parse(args); err != nil {
+		return updateArgs{}, err
+	}
+	if fs.NArg() > 0 {
+		return updateArgs{}, fmt.Errorf("unexpected argument %q", fs.Arg(0))
+	}
+	return updateArgs{version: strings.TrimSpace(*version)}, nil
+}
+
+func parseRollbackArgs(args []string, opts runOptions) error {
+	fs := flag.NewFlagSet("rollback", flag.ContinueOnError)
+	fs.SetOutput(opts.stderr)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		return fmt.Errorf("unexpected argument %q", fs.Arg(0))
+	}
+	return nil
+}
+
+func runUpdate(args []string, opts runOptions) error {
+	parsed, err := parseUpdateArgs(args, opts)
+	if err != nil {
+		return err
+	}
+	baseURL := strings.TrimSpace(os.Getenv("DPX_UPDATE_BASE_URL"))
+	result, err := runSelfUpdate(selfupdate.UpdateOptions{
+		Version: parsed.version,
+		BaseURL: baseURL,
+	})
+	if err != nil {
+		return err
+	}
+	if result.Scheduled {
+		fmt.Fprintf(opts.stdout, "Update scheduled (%s). Close and reopen your terminal, then run dpx --version.\n", result.Version)
+		fmt.Fprintf(opts.stdout, "Backup: %s\n", result.BackupPath)
+		return nil
+	}
+	fmt.Fprintf(opts.stdout, "Updated dpx (%s) at %s\n", result.Version, result.CurrentPath)
+	fmt.Fprintf(opts.stdout, "Backup: %s\n", result.BackupPath)
+	return nil
+}
+
+func runRollback(args []string, opts runOptions) error {
+	if err := parseRollbackArgs(args, opts); err != nil {
+		return err
+	}
+	result, err := runSelfRollback(selfupdate.RollbackOptions{})
+	if err != nil {
+		return err
+	}
+	if result.Scheduled {
+		fmt.Fprintln(opts.stdout, "Rollback scheduled. Close and reopen your terminal, then run dpx --version.")
+		fmt.Fprintf(opts.stdout, "Source backup: %s\n", result.BackupPath)
+		return nil
+	}
+	fmt.Fprintf(opts.stdout, "Rollback completed. Current binary restored from %s\n", result.BackupPath)
 	return nil
 }
 
@@ -1923,6 +2002,8 @@ var commandAliases = map[string]string{
 	"init":      "init",
 	"doctor":    "doctor",
 	"uninstall": "uninstall",
+	"update":    "update",
+	"rollback":  "rollback",
 	"policy":    "policy",
 	"run":       "run",
 	"env":       "env",
@@ -1979,7 +2060,7 @@ func suggestCommand(input string) string {
 	if strings.TrimSpace(input) == "" {
 		return ""
 	}
-	candidates := []string{"init", "doctor", "uninstall", "env", "keygen", "encrypt", "decrypt", "inspect", "tui", "version", "help"}
+	candidates := []string{"init", "doctor", "uninstall", "update", "rollback", "env", "keygen", "encrypt", "decrypt", "inspect", "tui", "version", "help"}
 	best := ""
 	bestDistance := 99
 	for _, candidate := range candidates {
@@ -2400,6 +2481,9 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  dpx encr .env             # prefix command (auto-resolve to encrypt)")
 	fmt.Fprintln(w, "  dpx decr .env.dpx         # prefix command (auto-resolve to decrypt)")
 	fmt.Fprintln(w, "  dpx uninstall --yes --remove-key --remove-encrypted")
+	fmt.Fprintln(w, "  dpx update                # update to latest release")
+	fmt.Fprintln(w, "  dpx update --version v1.2.3")
+	fmt.Fprintln(w, "  dpx rollback              # restore previous binary backup")
 	fmt.Fprintln(w, "  dpx env encrypt .env --mode age --keys API_KEY,JWT_SECRET")
 	fmt.Fprintln(w, "  dpx env decrypt .env.dpx --password <pass>")
 	fmt.Fprintln(w, "  dpx env list .env.dpx --password <pass>")
@@ -2419,6 +2503,8 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  tui")
 	fmt.Fprintln(w, "  doctor")
 	fmt.Fprintln(w, "  uninstall")
+	fmt.Fprintln(w, "  update")
+	fmt.Fprintln(w, "  rollback")
 	fmt.Fprintln(w, "  env (encrypt|decrypt|list|get|set|updatekeys)")
 	fmt.Fprintln(w, "  version")
 	fmt.Fprintln(w, "  help")
@@ -2426,6 +2512,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "Flags:")
 	fmt.Fprintln(w, "  --version, -v")
 	fmt.Fprintln(w, "  uninstall: --yes --remove-key --remove-encrypted")
+	fmt.Fprintln(w, "  update: [--version]")
 	fmt.Fprintln(w, "  keygen: [--out] [--regen] [--import-file] [--import-stdin] [--no-config-update]")
 	fmt.Fprintln(w, "  encrypt: [file] [--password] [--age] [--recipient] [--kdf-profile] [--out]")
 	fmt.Fprintln(w, "  run: [--file|-f] [--password] [--identity] -- <command>")
@@ -2436,6 +2523,8 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  env set: [file] --key --value [--encrypt --mode --recipient --password --kdf-profile --out]")
 	fmt.Fprintln(w, "  env updatekeys: [file] --recipient [--keys] [--identity] [--out]")
 	fmt.Fprintln(w, "Notes:")
+	fmt.Fprintln(w, "  - update/rollback use local binary backup file (.rollback)")
+	fmt.Fprintln(w, "  - optional env DPX_UPDATE_BASE_URL overrides release asset base URL")
 	fmt.Fprintln(w, "  - Password prompts are interactive and require confirmation when encrypting")
 	fmt.Fprintln(w, "  - Password mode supports --kdf-profile balanced|hardened|paranoid")
 	fmt.Fprintln(w, "  - Omit file args to use guided picker/search flow")

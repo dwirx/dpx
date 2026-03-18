@@ -2,6 +2,7 @@ package agex_test
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 
 	"github.com/dwirx/dpx/internal/crypto/agex"
@@ -48,5 +49,32 @@ func TestIdentityFromPrivateDataParsesCommentsAndKeys(t *testing.T) {
 	}
 	if parsed.PrivateKey != identity.PrivateKey {
 		t.Fatalf("private key mismatch: got %q want %q", parsed.PrivateKey, identity.PrivateKey)
+	}
+}
+
+func TestIdentityFromPrivateDataIgnoresNonIdentityNoiseLines(t *testing.T) {
+	t.Parallel()
+
+	identity, err := agex.GenerateIdentity()
+	if err != nil {
+		t.Fatalf("generate identity: %v", err)
+	}
+
+	raw := strings.Join([]string{
+		"# created: 2026-03-17T11:00:00Z",
+		"# public key: age1fcppx2qfgy0a77",
+		"kq9wcag895jeces0qm2yg2sskwmzyuuh5trgpqdv82t2",
+		identity.PrivateKey,
+		"",
+	}, "\n")
+	parsed, err := agex.IdentityFromPrivateData(raw)
+	if err != nil {
+		t.Fatalf("parse identity from noisy data: %v", err)
+	}
+	if parsed.PrivateKey != identity.PrivateKey {
+		t.Fatalf("private key mismatch: got %q want %q", parsed.PrivateKey, identity.PrivateKey)
+	}
+	if parsed.PublicKey != identity.PublicKey {
+		t.Fatalf("public key mismatch: got %q want %q", parsed.PublicKey, identity.PublicKey)
 	}
 }

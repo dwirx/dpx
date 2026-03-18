@@ -270,6 +270,28 @@ Use custom identity for `age` mode:
 dpx run .env.dpx --identity ~/.config/dpx/age-keys.txt -- ./bin/server
 ```
 
+### Update or rollback CLI binary
+
+If your binary is named `podx`, replace `dpx` with `podx` in commands below.
+
+Update to latest release:
+
+```bash
+dpx update
+```
+
+Update to a specific version:
+
+```bash
+dpx update --version v1.2.3
+```
+
+Rollback to the previous local backup:
+
+```bash
+dpx rollback
+```
+
 ### Inline `.env` key encryption
 
 Encrypt selected keys only (values become `ENC[...]` inline):
@@ -414,6 +436,33 @@ Rules:
 - `--import-stdin` reads the same format from stdin
 - `--no-config-update` skips `.dpx.yaml` sync
 
+Cross-shell import examples:
+
+PowerShell:
+
+```powershell
+dpx keygen --import-file .\age-keys.txt
+# or
+Get-Content -Raw .\age-keys.txt | dpx keygen --import-stdin
+```
+
+CMD:
+
+```bat
+dpx keygen --import-file age-keys.txt
+type age-keys.txt | dpx keygen --import-stdin
+```
+
+Git Bash:
+
+```bash
+dpx keygen --import-file ./age-keys.txt
+cat ./age-keys.txt | dpx keygen --import-stdin
+```
+
+Tip:
+- avoid pasting wrapped key text directly in shell commands; save to `age-keys.txt` then use `--import-file`.
+
 ### `dpx uninstall [--yes] [--remove-key] [--remove-encrypted]`
 
 Remove DPX files safely.
@@ -423,6 +472,24 @@ Behavior:
 - `--remove-key` removes key file only if it is in a safe scope (default/legacy path or inside current project)
 - `--remove-encrypted` removes `.dpx` files in current directory
 - without `--yes`, command asks for explicit confirmation (`YES`)
+
+### `dpx update [--version <vX.Y.Z>]`
+
+Self-update DPX binary from GitHub releases.
+
+Rules:
+- default pulls latest release asset for current OS/architecture
+- `--version` pins to a specific release tag
+- DPX stores previous binary as rollback backup (`.rollback`)
+- optional env `DPX_UPDATE_BASE_URL` overrides asset base URL (advanced/testing)
+
+### `dpx rollback`
+
+Restore the previous local backup binary created by `dpx update`.
+
+Rules:
+- requires existing rollback backup
+- on Windows update/rollback may be scheduled and applied after process exits
 
 ### `dpx encrypt <file> [--password <text>] [--age] [--recipient <csv>] [--kdf-profile <balanced|hardened|paranoid>] [--out <path>]`
 
