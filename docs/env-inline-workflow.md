@@ -11,9 +11,11 @@ Gunakan mode inline kalau Anda ingin:
 
 ## 🧩 Format Token
 
-DPX menggunakan dua format utama:
-- `ENC[age:...]` untuk mode public-key (`age`)
-- `ENC[pwd:v1:...]` untuk mode password (Argon2id + XChaCha20-Poly1305)
+Default terbaru memakai format mode-blind:
+- `ENC[v2:...]` untuk semua mode (age/password disembunyikan di payload)
+
+Kompatibilitas:
+- token lama `ENC[age:...]` dan `ENC[pwd:v1:...]` tetap bisa didekripsi
 
 ## 🚀 Alur Utama
 
@@ -23,7 +25,7 @@ DPX menggunakan dua format utama:
 dpx env encrypt .env --mode age --keys API_KEY,JWT_SECRET
 # atau
 
-dpx env encrypt .env --mode password --keys API_KEY --password 'secret'
+dpx env encrypt .env --mode password --keys API_KEY --password 'secret' --kdf-profile hardened
 ```
 
 Hasil:
@@ -62,6 +64,7 @@ Catatan:
 - default update in-place (file yang sama)
 - gunakan `--out` kalau ingin file output terpisah
 - mode password akan minta konfirmasi password saat tidak di-pass via flag
+- untuk resistance brute-force lebih tinggi, gunakan `--kdf-profile hardened` atau `--kdf-profile paranoid`
 
 ### 5) Rotasi recipient mode age
 

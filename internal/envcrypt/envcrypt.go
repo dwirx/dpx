@@ -1,7 +1,9 @@
 package envcrypt
 
 import (
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -14,9 +16,14 @@ import (
 )
 
 const (
+	prefixV2    = "ENC[v2:"
 	prefixAge   = "ENC[age:"
 	prefixPwdV1 = "ENC[pwd:v1:"
 	tokenSuffix = "]"
+
+	tokenModeAge byte = 1
+	tokenModePwd byte = 2
+	maxPadBytes       = 24
 )
 
 var envKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -26,6 +33,7 @@ type EncryptRequest struct {
 	Recipients   []string
 	Passphrase   []byte
 	SelectedKeys []string
+	KDFProfile   string
 }
 
 type DecryptRequest struct {
@@ -40,6 +48,7 @@ type SetRequest struct {
 	Mode       string
 	Recipients []string
 	Passphrase []byte
+	KDFProfile string
 }
 
 type UpdateRecipientsRequest struct {
@@ -69,6 +78,12 @@ type lineRecord struct {
 	value     string
 }
 
+type tokenData struct {
+	mode    string
+	payload []byte
+	legacy  bool
+}
+
 func Set(content []byte, req SetRequest) ([]byte, Result, error) {
 	key := strings.TrimSpace(req.Key)
 	if !envKeyPattern.MatchString(key) {
@@ -92,6 +107,7 @@ func Set(content []byte, req SetRequest) ([]byte, Result, error) {
 			Mode:       req.Mode,
 			Recipients: req.Recipients,
 			Passphrase: req.Passphrase,
+			KDFProfile: req.KDFProfile,
 		})
 		if err != nil {
 			return nil, Result{}, err
@@ -149,22 +165,22 @@ func UpdateAgeRecipients(content []byte, req UpdateRecipientsRequest) ([]byte, R
 				continue
 			}
 		}
-		mode, payload, ok := parseToken(rec.value)
-		if !ok || mode != envelope.ModeAge {
+		token, ok := parseToken(rec.value)
+		if !ok || token.mode != envelope.ModeAge {
 			continue
 		}
-		plain, err := decryptValue(mode, payload, DecryptRequest{PrivateKey: req.PrivateKey})
+		plain, err := decryptValue(token, DecryptRequest{PrivateKey: req.PrivateKey})
 		if err != nil {
 			return nil, Result{}, fmt.Errorf("decrypt %s: %w", rec.key, err)
 		}
-		token, err := encryptValue(plain, EncryptRequest{
+		reEncryptedToken, err := encryptValue(plain, EncryptRequest{
 			Mode:       envelope.ModeAge,
 			Recipients: req.Recipients,
 		})
 		if err != nil {
 			return nil, Result{}, fmt.Errorf("encrypt %s: %w", rec.key, err)
 		}
-		lines[idx].raw = rec.left + "=" + preserveValuePadding(rec.value, token)
+		lines[idx].raw = rec.left + "=" + preserveValuePadding(rec.value, reEncryptedToken)
 		updatedSet[rec.key] = struct{}{}
 	}
 
@@ -206,7 +222,7 @@ func Encrypt(content []byte, req EncryptRequest) ([]byte, Result, error) {
 				continue
 			}
 		}
-		if _, _, ok := parseToken(rec.value); ok {
+		if _, ok := parseToken(rec.value); ok {
 			continue
 		}
 
@@ -233,11 +249,11 @@ func Decrypt(content []byte, req DecryptRequest) ([]byte, Result, error) {
 		if !rec.hasAssign {
 			continue
 		}
-		mode, payload, ok := parseToken(rec.value)
+		token, ok := parseToken(rec.value)
 		if !ok {
 			continue
 		}
-		plain, err := decryptValue(mode, payload, req)
+		plain, err := decryptValue(token, req)
 		if err != nil {
 			return nil, Result{}, fmt.Errorf("decrypt %s: %w", rec.key, err)
 		}
@@ -259,7 +275,28 @@ func ListEncryptableKeys(content []byte) []string {
 		if !rec.hasAssign {
 			continue
 		}
-		if _, _, ok := parseToken(rec.value); ok {
+		if _, ok := parseToken(rec.value); ok {
+			continue
+		}
+		unique[rec.key] = struct{}{}
+	}
+	keys := make([]string, 0, len(unique))
+	for key := range unique {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func ListAgeEncryptedKeys(content []byte) []string {
+	lines, _ := parseLines(content)
+	unique := make(map[string]struct{})
+	for _, rec := range lines {
+		if !rec.hasAssign {
+			continue
+		}
+		token, ok := parseToken(rec.value)
+		if !ok || token.mode != envelope.ModeAge {
 			continue
 		}
 		unique[rec.key] = struct{}{}
@@ -280,11 +317,11 @@ func DetectModes(content []byte) (bool, bool) {
 		if !rec.hasAssign {
 			continue
 		}
-		mode, _, ok := parseToken(rec.value)
+		token, ok := parseToken(rec.value)
 		if !ok {
 			continue
 		}
-		switch mode {
+		switch token.mode {
 		case envelope.ModeAge:
 			hasAge = true
 		case envelope.ModePassword:
@@ -301,9 +338,9 @@ func encryptValue(value string, req EncryptRequest) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		return prefixAge + base64.RawURLEncoding.EncodeToString(ciphertext) + tokenSuffix, nil
+		return encodeV2Token(tokenModeAge, ciphertext)
 	case envelope.ModePassword:
-		params, err := password.NewParams()
+		params, err := password.NewParamsForProfile(req.KDFProfile)
 		if err != nil {
 			return "", err
 		}
@@ -311,26 +348,169 @@ func encryptValue(value string, req EncryptRequest) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		blob := passwordBlobV1{
-			Nonce:       base64.RawURLEncoding.EncodeToString(params.Nonce),
-			Salt:        base64.RawURLEncoding.EncodeToString(params.Salt),
-			MemoryKiB:   params.MemoryKiB,
-			Iterations:  params.Iterations,
-			Parallelism: params.Parallelism,
-			Ciphertext:  base64.RawURLEncoding.EncodeToString(sealed),
-		}
-		encoded, err := json.Marshal(blob)
+		encoded, err := encodePasswordBlobV2(params, sealed)
 		if err != nil {
 			return "", err
 		}
-		return prefixPwdV1 + base64.RawURLEncoding.EncodeToString(encoded) + tokenSuffix, nil
+		return encodeV2Token(tokenModePwd, encoded)
 	default:
 		return "", fmt.Errorf("unsupported mode %q", req.Mode)
 	}
 }
 
-func decryptValue(mode, payload string, req DecryptRequest) (string, error) {
-	switch mode {
+func decryptValue(token tokenData, req DecryptRequest) (string, error) {
+	if token.legacy {
+		return decryptLegacyToken(token, req)
+	}
+	switch token.mode {
+	case envelope.ModeAge:
+		if strings.TrimSpace(req.PrivateKey) == "" {
+			return "", fmt.Errorf("private key is required for age token")
+		}
+		plaintext, err := agex.Decrypt(token.payload, req.PrivateKey)
+		if err != nil {
+			return "", err
+		}
+		return string(plaintext), nil
+	case envelope.ModePassword:
+		if len(req.Passphrase) == 0 {
+			return "", fmt.Errorf("passphrase is required for password token")
+		}
+		params, ciphertext, err := decodePasswordBlobV2(token.payload)
+		if err != nil {
+			return "", err
+		}
+		plaintext, err := password.Decrypt(ciphertext, req.Passphrase, params)
+		if err != nil {
+			return "", err
+		}
+		return string(plaintext), nil
+	default:
+		return "", fmt.Errorf("unsupported token mode %q", token.mode)
+	}
+}
+
+func parseToken(value string) (tokenData, bool) {
+	trimmed := strings.TrimSpace(value)
+	if strings.HasPrefix(trimmed, prefixV2) && strings.HasSuffix(trimmed, tokenSuffix) {
+		payloadText := strings.TrimSuffix(strings.TrimPrefix(trimmed, prefixV2), tokenSuffix)
+		if payloadText == "" {
+			return tokenData{}, false
+		}
+		raw, err := base64.RawURLEncoding.DecodeString(payloadText)
+		if err != nil {
+			return tokenData{}, false
+		}
+		if len(raw) < 3 {
+			return tokenData{}, false
+		}
+		modeByte := raw[0]
+		padLen := int(raw[1])
+		if len(raw) < 2+padLen+1 {
+			return tokenData{}, false
+		}
+		body := raw[2+padLen:]
+		switch modeByte {
+		case tokenModeAge:
+			return tokenData{mode: envelope.ModeAge, payload: body, legacy: false}, true
+		case tokenModePwd:
+			return tokenData{mode: envelope.ModePassword, payload: body, legacy: false}, true
+		default:
+			return tokenData{}, false
+		}
+	}
+	if strings.HasPrefix(trimmed, prefixAge) && strings.HasSuffix(trimmed, tokenSuffix) {
+		payload := strings.TrimSuffix(strings.TrimPrefix(trimmed, prefixAge), tokenSuffix)
+		if payload == "" {
+			return tokenData{}, false
+		}
+		return tokenData{mode: envelope.ModeAge, payload: []byte(payload), legacy: true}, true
+	}
+	if strings.HasPrefix(trimmed, prefixPwdV1) && strings.HasSuffix(trimmed, tokenSuffix) {
+		payload := strings.TrimSuffix(strings.TrimPrefix(trimmed, prefixPwdV1), tokenSuffix)
+		if payload == "" {
+			return tokenData{}, false
+		}
+		return tokenData{mode: envelope.ModePassword, payload: []byte(payload), legacy: true}, true
+	}
+	return tokenData{}, false
+}
+
+func decodePasswordBlobV2(payload []byte) (password.Params, []byte, error) {
+	if len(payload) < 11 {
+		return password.Params{}, nil, fmt.Errorf("malformed password payload")
+	}
+	memory := binary.BigEndian.Uint32(payload[0:4])
+	iterations := binary.BigEndian.Uint32(payload[4:8])
+	parallelism := payload[8]
+	saltLen := int(payload[9])
+	nonceLen := int(payload[10])
+	if saltLen <= 0 || nonceLen <= 0 {
+		return password.Params{}, nil, fmt.Errorf("malformed password payload")
+	}
+	headerLen := 11 + saltLen + nonceLen
+	if len(payload) <= headerLen {
+		return password.Params{}, nil, fmt.Errorf("malformed password payload")
+	}
+	salt := append([]byte{}, payload[11:11+saltLen]...)
+	nonce := append([]byte{}, payload[11+saltLen:headerLen]...)
+	ciphertext := append([]byte{}, payload[headerLen:]...)
+	params := password.Params{
+		Salt:        salt,
+		Nonce:       nonce,
+		MemoryKiB:   memory,
+		Iterations:  iterations,
+		Parallelism: parallelism,
+		KeyLength:   password.KeySize,
+	}
+	return params, ciphertext, nil
+}
+
+func encodePasswordBlobV2(params password.Params, ciphertext []byte) ([]byte, error) {
+	if err := password.ValidateParams(params); err != nil {
+		return nil, err
+	}
+	if len(params.Salt) > 255 {
+		return nil, fmt.Errorf("salt too long")
+	}
+	if len(params.Nonce) > 255 {
+		return nil, fmt.Errorf("nonce too long")
+	}
+	out := make([]byte, 11+len(params.Salt)+len(params.Nonce)+len(ciphertext))
+	binary.BigEndian.PutUint32(out[0:4], params.MemoryKiB)
+	binary.BigEndian.PutUint32(out[4:8], params.Iterations)
+	out[8] = params.Parallelism
+	out[9] = byte(len(params.Salt))
+	out[10] = byte(len(params.Nonce))
+	offset := 11
+	copy(out[offset:offset+len(params.Salt)], params.Salt)
+	offset += len(params.Salt)
+	copy(out[offset:offset+len(params.Nonce)], params.Nonce)
+	offset += len(params.Nonce)
+	copy(out[offset:], ciphertext)
+	return out, nil
+}
+
+func encodeV2Token(mode byte, payload []byte) (string, error) {
+	padLenRaw := make([]byte, 1)
+	if _, err := rand.Read(padLenRaw); err != nil {
+		return "", fmt.Errorf("read token pad size: %w", err)
+	}
+	padLen := int(padLenRaw[0] % byte(maxPadBytes+1))
+	pad := make([]byte, padLen)
+	if _, err := rand.Read(pad); err != nil {
+		return "", fmt.Errorf("read token pad: %w", err)
+	}
+	raw := make([]byte, 0, 2+padLen+len(payload))
+	raw = append(raw, mode, byte(padLen))
+	raw = append(raw, pad...)
+	raw = append(raw, payload...)
+	return prefixV2 + base64.RawURLEncoding.EncodeToString(raw) + tokenSuffix, nil
+}
+
+func decryptLegacyToken(token tokenData, req DecryptRequest) (string, error) {
+	payload := string(token.payload)
+	switch token.mode {
 	case envelope.ModeAge:
 		if strings.TrimSpace(req.PrivateKey) == "" {
 			return "", fmt.Errorf("private key is required for age token")
@@ -382,27 +562,8 @@ func decryptValue(mode, payload string, req DecryptRequest) (string, error) {
 		}
 		return string(plaintext), nil
 	default:
-		return "", fmt.Errorf("unsupported token mode %q", mode)
+		return "", fmt.Errorf("unsupported legacy token mode %q", token.mode)
 	}
-}
-
-func parseToken(value string) (string, string, bool) {
-	trimmed := strings.TrimSpace(value)
-	if strings.HasPrefix(trimmed, prefixAge) && strings.HasSuffix(trimmed, tokenSuffix) {
-		payload := strings.TrimSuffix(strings.TrimPrefix(trimmed, prefixAge), tokenSuffix)
-		if payload == "" {
-			return "", "", false
-		}
-		return envelope.ModeAge, payload, true
-	}
-	if strings.HasPrefix(trimmed, prefixPwdV1) && strings.HasSuffix(trimmed, tokenSuffix) {
-		payload := strings.TrimSuffix(strings.TrimPrefix(trimmed, prefixPwdV1), tokenSuffix)
-		if payload == "" {
-			return "", "", false
-		}
-		return envelope.ModePassword, payload, true
-	}
-	return "", "", false
 }
 
 func parseLines(content []byte) ([]lineRecord, bool) {

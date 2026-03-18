@@ -28,6 +28,7 @@ type EncryptRequest struct {
 	Mode       string
 	Passphrase []byte
 	Recipients []string
+	KDFProfile string
 }
 
 type DecryptRequest struct {
@@ -45,6 +46,7 @@ type EnvInlineEncryptRequest struct {
 	Passphrase   []byte
 	Recipients   []string
 	SelectedKeys []string
+	KDFProfile   string
 }
 
 type EnvInlineDecryptRequest struct {
@@ -66,6 +68,7 @@ type EnvInlineSetRequest struct {
 	Recipients   []string
 	IdentityPath string
 	PrivateKey   string
+	KDFProfile   string
 }
 
 type EnvInlineUpdateRecipientsRequest struct {
@@ -157,6 +160,14 @@ func (s Service) ListEnvInlineKeys(path string) ([]string, error) {
 	return envcrypt.ListEncryptableKeys(data), nil
 }
 
+func (s Service) ListEnvInlineAgeEncryptedKeys(path string) ([]string, error) {
+	data, err := safeio.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return envcrypt.ListAgeEncryptedKeys(data), nil
+}
+
 func (s Service) DetectEnvInlineModes(path string) (bool, bool, error) {
 	data, err := safeio.ReadFile(path)
 	if err != nil {
@@ -180,6 +191,7 @@ func (s Service) EncryptEnvInlineFile(req EnvInlineEncryptRequest) (EnvInlineRes
 		Passphrase:   req.Passphrase,
 		Recipients:   req.Recipients,
 		SelectedKeys: req.SelectedKeys,
+		KDFProfile:   req.KDFProfile,
 	}
 	if encryptReq.Mode == envelope.ModeAge && len(encryptReq.Recipients) == 0 {
 		encryptReq.Recipients = append([]string{}, s.cfg.Age.Recipients...)
@@ -273,6 +285,7 @@ func (s Service) SetEnvInlineValue(req EnvInlineSetRequest) (EnvInlineResult, er
 		Mode:       mode,
 		Recipients: recipients,
 		Passphrase: req.Passphrase,
+		KDFProfile: req.KDFProfile,
 	})
 	if err != nil {
 		return EnvInlineResult{}, err
@@ -357,10 +370,12 @@ func (s Service) EncryptFile(req EncryptRequest) (string, error) {
 	var payload []byte
 	switch req.Mode {
 	case envelope.ModePassword:
-		params, err := password.NewParams()
+		params, err := password.NewParamsForProfile(req.KDFProfile)
 		if err != nil {
 			return "", err
 		}
+		meta.EncryptionAlgorithm = "xchacha20poly1305"
+		meta.EncryptionNonceB64 = base64.StdEncoding.EncodeToString(params.Nonce)
 		meta.KDF = &envelope.KDFParams{
 			Algorithm:   "argon2id",
 			SaltBase64:  base64.StdEncoding.EncodeToString(params.Salt),
@@ -368,16 +383,21 @@ func (s Service) EncryptFile(req EncryptRequest) (string, error) {
 			Iterations:  params.Iterations,
 			Parallelism: params.Parallelism,
 		}
+		aad, err := envelope.MetadataAAD(meta)
+		if err != nil {
+			return "", err
+		}
 		protected, err := envelope.MarshalProtected(meta, plaintext)
 		if err != nil {
 			return "", err
 		}
-		sealed, err := password.EncryptWithParams(protected, req.Passphrase, params)
+		sealed, err := password.EncryptWithParamsAndAAD(protected, req.Passphrase, params, aad)
 		if err != nil {
 			return "", err
 		}
-		payload = append(append([]byte{}, params.Nonce...), sealed...)
+		payload = sealed
 	case envelope.ModeAge:
+		meta.EncryptionAlgorithm = "age"
 		recipients := req.Recipients
 		if len(recipients) == 0 {
 			recipients = s.cfg.Age.Recipients
@@ -441,24 +461,44 @@ func (s Service) DecryptFile(req DecryptRequest) (string, error) {
 		if meta.KDF.Algorithm != "argon2id" {
 			return "", fmt.Errorf("unsupported kdf algorithm %q", meta.KDF.Algorithm)
 		}
+		if meta.EncryptionAlgorithm != "" && meta.EncryptionAlgorithm != "xchacha20poly1305" {
+			return "", fmt.Errorf("unsupported encryption algorithm %q", meta.EncryptionAlgorithm)
+		}
 		salt, err := base64.StdEncoding.DecodeString(meta.KDF.SaltBase64)
 		if err != nil {
 			return "", fmt.Errorf("decode salt: %w", err)
 		}
-		if len(payload) < password.NonceSize {
-			return "", fmt.Errorf("malformed password payload")
-		}
 		params := password.Params{
 			Salt:        salt,
-			Nonce:       append([]byte{}, payload[:password.NonceSize]...),
 			MemoryKiB:   meta.KDF.MemoryKiB,
 			Iterations:  meta.KDF.Iterations,
 			Parallelism: meta.KDF.Parallelism,
 			KeyLength:   password.KeySize,
 		}
-		protected, err = password.Decrypt(payload[password.NonceSize:], req.Passphrase, params)
-		if err != nil {
-			return "", err
+		ciphertext := payload
+		if meta.EncryptionNonceB64 != "" {
+			nonce, err := base64.StdEncoding.DecodeString(meta.EncryptionNonceB64)
+			if err != nil {
+				return "", fmt.Errorf("decode nonce: %w", err)
+			}
+			params.Nonce = append([]byte{}, nonce...)
+			aad, err := envelope.MetadataAAD(meta)
+			if err != nil {
+				return "", err
+			}
+			protected, err = password.DecryptWithAAD(ciphertext, req.Passphrase, params, aad)
+			if err != nil {
+				return "", err
+			}
+		} else {
+			if len(payload) < password.NonceSize {
+				return "", fmt.Errorf("malformed password payload")
+			}
+			params.Nonce = append([]byte{}, payload[:password.NonceSize]...)
+			protected, err = password.Decrypt(payload[password.NonceSize:], req.Passphrase, params)
+			if err != nil {
+				return "", err
+			}
 		}
 	case envelope.ModeAge:
 		privateKey, err := s.resolvePrivateKey(req)

@@ -2,16 +2,19 @@ package app_test
 
 import (
 	"bytes"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dwirx/dpx/internal/app"
 	"github.com/dwirx/dpx/internal/config"
 	"github.com/dwirx/dpx/internal/crypto/agex"
+	"github.com/dwirx/dpx/internal/crypto/password"
 	"github.com/dwirx/dpx/internal/envelope"
 )
 
@@ -90,6 +93,12 @@ func TestPasswordEncryptInspectDecryptRoundTrip(t *testing.T) {
 	if meta.Mode != envelope.ModePassword {
 		t.Fatalf("mode mismatch: got %q", meta.Mode)
 	}
+	if meta.EncryptionAlgorithm != "xchacha20poly1305" {
+		t.Fatalf("expected xchacha20poly1305 algorithm metadata, got %q", meta.EncryptionAlgorithm)
+	}
+	if meta.EncryptionNonceB64 == "" {
+		t.Fatal("expected encryption nonce metadata to be present")
+	}
 
 	restoredPath, err := svc.DecryptFile(app.DecryptRequest{
 		InputPath:  encryptedPath,
@@ -108,6 +117,92 @@ func TestPasswordEncryptInspectDecryptRoundTrip(t *testing.T) {
 	}
 	if !bytes.Equal(restored, plaintext) {
 		t.Fatalf("restored plaintext mismatch: got %q want %q", restored, plaintext)
+	}
+}
+
+func TestEncryptRejectsUnknownKDFProfile(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, ".env")
+	if err := os.WriteFile(sourcePath, []byte("FOO=bar\n"), 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	svc := app.New(config.Default())
+	_, err := svc.EncryptFile(app.EncryptRequest{
+		InputPath:  sourcePath,
+		Mode:       envelope.ModePassword,
+		Passphrase: []byte("secret-123"),
+		KDFProfile: "invalid-profile",
+	})
+	if err == nil {
+		t.Fatal("expected unknown kdf profile to fail")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "kdf profile") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestDecryptLegacyPasswordEnvelopeFormat(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	legacyPath := filepath.Join(dir, ".env.legacy.dpx")
+	plaintext := []byte("FOO=bar\n")
+	originalMode := uint32(0o600)
+	meta := envelope.Metadata{
+		Version:          1,
+		Mode:             envelope.ModePassword,
+		OriginalName:     ".env",
+		OriginalFileMode: &originalMode,
+		CreatedAt:        time.Now().UTC().Truncate(time.Second),
+		PayloadEncoding:  "base64",
+	}
+
+	params, err := password.NewParams()
+	if err != nil {
+		t.Fatalf("new params: %v", err)
+	}
+	meta.KDF = &envelope.KDFParams{
+		Algorithm:   "argon2id",
+		SaltBase64:  base64.StdEncoding.EncodeToString(params.Salt),
+		MemoryKiB:   params.MemoryKiB,
+		Iterations:  params.Iterations,
+		Parallelism: params.Parallelism,
+	}
+	protected, err := envelope.MarshalProtected(meta, plaintext)
+	if err != nil {
+		t.Fatalf("marshal protected: %v", err)
+	}
+	sealed, err := password.EncryptWithParams(protected, []byte("secret-123"), params)
+	if err != nil {
+		t.Fatalf("encrypt with params: %v", err)
+	}
+	payload := append(append([]byte{}, params.Nonce...), sealed...)
+	encoded, err := envelope.Marshal(meta, payload)
+	if err != nil {
+		t.Fatalf("marshal envelope: %v", err)
+	}
+	if err := os.WriteFile(legacyPath, encoded, 0o600); err != nil {
+		t.Fatalf("write legacy envelope: %v", err)
+	}
+
+	svc := app.New(config.Default())
+	outputPath := filepath.Join(dir, ".env.dec")
+	if _, err := svc.DecryptFile(app.DecryptRequest{
+		InputPath:  legacyPath,
+		OutputPath: outputPath,
+		Passphrase: []byte("secret-123"),
+	}); err != nil {
+		t.Fatalf("decrypt legacy envelope: %v", err)
+	}
+	restored, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("read restored: %v", err)
+	}
+	if string(restored) != string(plaintext) {
+		t.Fatalf("legacy restore mismatch: got %q want %q", restored, plaintext)
 	}
 }
 
@@ -449,7 +544,7 @@ func TestEnvInlinePasswordRoundTrip(t *testing.T) {
 		t.Fatalf("read encrypted output: %v", err)
 	}
 	text := string(content)
-	if !strings.Contains(text, "API_KEY=ENC[pwd:v1:") || !strings.Contains(text, "JWT_SECRET=ENC[pwd:v1:") {
+	if !strings.Contains(text, "API_KEY=ENC[v2:") || !strings.Contains(text, "JWT_SECRET=ENC[v2:") {
 		t.Fatalf("expected selected keys to be inline encrypted, got %q", text)
 	}
 	if !strings.Contains(text, "DATABASE_URL=postgres://user:password@localhost:5432/mydb") {

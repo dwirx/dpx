@@ -20,13 +20,15 @@ const (
 )
 
 type Metadata struct {
-	Version          int
-	Mode             string
-	OriginalName     string
-	OriginalFileMode *uint32
-	CreatedAt        time.Time
-	PayloadEncoding  string
-	KDF              *KDFParams
+	Version             int
+	Mode                string
+	OriginalName        string
+	OriginalFileMode    *uint32
+	CreatedAt           time.Time
+	PayloadEncoding     string
+	EncryptionAlgorithm string
+	EncryptionNonceB64  string
+	KDF                 *KDFParams
 }
 
 type KDFParams struct {
@@ -65,6 +67,19 @@ func Marshal(meta Metadata, payload []byte) ([]byte, error) {
 	if err := validateHeaderValue("Payload-Encoding", meta.PayloadEncoding); err != nil {
 		return nil, err
 	}
+	if meta.EncryptionAlgorithm != "" {
+		if err := validateHeaderValue("Encryption-Algorithm", meta.EncryptionAlgorithm); err != nil {
+			return nil, err
+		}
+	}
+	if meta.EncryptionNonceB64 != "" {
+		if err := validateHeaderValue("Encryption-Nonce", meta.EncryptionNonceB64); err != nil {
+			return nil, err
+		}
+		if _, err := base64.StdEncoding.DecodeString(meta.EncryptionNonceB64); err != nil {
+			return nil, fmt.Errorf("invalid encryption nonce: %w", err)
+		}
+	}
 	if meta.KDF != nil {
 		if err := validateHeaderValue("KDF-Algorithm", meta.KDF.Algorithm); err != nil {
 			return nil, err
@@ -83,6 +98,12 @@ func Marshal(meta Metadata, payload []byte) ([]byte, error) {
 	}
 	fmt.Fprintf(&buf, "Created-At: %s\n", meta.CreatedAt.UTC().Format(time.RFC3339))
 	fmt.Fprintf(&buf, "Payload-Encoding: %s\n", meta.PayloadEncoding)
+	if meta.EncryptionAlgorithm != "" {
+		fmt.Fprintf(&buf, "Encryption-Algorithm: %s\n", meta.EncryptionAlgorithm)
+	}
+	if meta.EncryptionNonceB64 != "" {
+		fmt.Fprintf(&buf, "Encryption-Nonce: %s\n", meta.EncryptionNonceB64)
+	}
 	if meta.KDF != nil {
 		fmt.Fprintf(&buf, "KDF-Algorithm: %s\n", meta.KDF.Algorithm)
 		fmt.Fprintf(&buf, "KDF-Salt: %s\n", meta.KDF.SaltBase64)
@@ -158,6 +179,16 @@ func Unmarshal(data []byte) (Metadata, []byte, error) {
 				return meta, nil, err
 			}
 			meta.PayloadEncoding = value
+		case "Encryption-Algorithm":
+			if err := validateHeaderValue("Encryption-Algorithm", value); err != nil {
+				return meta, nil, err
+			}
+			meta.EncryptionAlgorithm = value
+		case "Encryption-Nonce":
+			if err := validateHeaderValue("Encryption-Nonce", value); err != nil {
+				return meta, nil, err
+			}
+			meta.EncryptionNonceB64 = value
 		case "KDF-Algorithm":
 			if err := validateHeaderValue("KDF-Algorithm", value); err != nil {
 				return meta, nil, err
@@ -205,6 +236,11 @@ func Unmarshal(data []byte) (Metadata, []byte, error) {
 	}
 	if meta.PayloadEncoding != "base64" {
 		return meta, nil, fmt.Errorf("unsupported payload encoding %q", meta.PayloadEncoding)
+	}
+	if meta.EncryptionNonceB64 != "" {
+		if _, err := base64.StdEncoding.DecodeString(meta.EncryptionNonceB64); err != nil {
+			return meta, nil, fmt.Errorf("decode encryption nonce: %w", err)
+		}
 	}
 
 	payloadText := strings.TrimSpace(string(sections[1]))

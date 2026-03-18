@@ -19,8 +19,10 @@ func TestMarshalUnmarshalRoundTrip(t *testing.T) {
 			mode := uint32(0o640)
 			return &mode
 		}(),
-		CreatedAt:       time.Date(2026, 3, 17, 10, 11, 12, 0, time.UTC),
-		PayloadEncoding: "base64",
+		CreatedAt:           time.Date(2026, 3, 17, 10, 11, 12, 0, time.UTC),
+		PayloadEncoding:     "base64",
+		EncryptionAlgorithm: "xchacha20poly1305",
+		EncryptionNonceB64:  "bm9uY2U2Nzg5MGFiY2RlZmdoaWo=",
 		KDF: &envelope.KDFParams{
 			Algorithm:   "argon2id",
 			SaltBase64:  "YWJjMTIz",
@@ -56,6 +58,12 @@ func TestMarshalUnmarshalRoundTrip(t *testing.T) {
 	}
 	if decodedMeta.KDF == nil || decodedMeta.KDF.Algorithm != "argon2id" {
 		t.Fatalf("expected KDF metadata to survive roundtrip")
+	}
+	if decodedMeta.EncryptionAlgorithm != "xchacha20poly1305" {
+		t.Fatalf("expected encryption algorithm to survive roundtrip, got %q", decodedMeta.EncryptionAlgorithm)
+	}
+	if decodedMeta.EncryptionNonceB64 != "bm9uY2U2Nzg5MGFiY2RlZmdoaWo=" {
+		t.Fatalf("expected encryption nonce to survive roundtrip, got %q", decodedMeta.EncryptionNonceB64)
 	}
 	if !bytes.Equal(decodedPayload, payload) {
 		t.Fatalf("payload mismatch: got %q want %q", decodedPayload, payload)

@@ -38,5 +38,18 @@ func normalizedMetadata(meta Metadata) Metadata {
 	if meta.PayloadEncoding == "" {
 		meta.PayloadEncoding = "base64"
 	}
+	if meta.EncryptionAlgorithm == "" {
+		switch meta.Mode {
+		case ModePassword:
+			meta.EncryptionAlgorithm = "xchacha20poly1305"
+		case ModeAge:
+			meta.EncryptionAlgorithm = "age"
+		}
+	}
 	return meta
+}
+
+func MetadataAAD(meta Metadata) ([]byte, error) {
+	normalized := normalizedMetadata(meta)
+	return json.Marshal(normalized)
 }

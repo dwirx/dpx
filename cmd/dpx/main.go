@@ -523,6 +523,7 @@ func runEncrypt(svc app.Service, cfg config.Config, args []string, opts runOptio
 		OutputPath: parsed.outPath,
 		Mode:       mode,
 		Recipients: recipients,
+		KDFProfile: parsed.kdfProfile,
 	}
 	switch mode {
 	case envelope.ModePassword:
@@ -569,6 +570,34 @@ func runDecrypt(svc app.Service, args []string, opts runOptions) error {
 
 	meta, err := svc.Inspect(filePath)
 	if err != nil {
+		hasAge, hasPassword, detectErr := svc.DetectEnvInlineModes(filePath)
+		if detectErr == nil && (hasAge || hasPassword) {
+			inlineReq := app.EnvInlineDecryptRequest{
+				InputPath:    filePath,
+				OutputPath:   parsed.outPath,
+				IdentityPath: parsed.identityPath,
+			}
+			if hasPassword {
+				inlineReq.Passphrase = []byte(parsed.passwordText)
+				if len(inlineReq.Passphrase) == 0 {
+					pass, promptErr := promptSecret(opts, "Password: ")
+					if promptErr != nil {
+						return promptErr
+					}
+					inlineReq.Passphrase = []byte(pass)
+				}
+			}
+			result, decErr := svc.DecryptEnvInlineFile(inlineReq)
+			if decErr != nil {
+				return decErr
+			}
+			fmt.Fprintf(opts.stdout, "Env inline decrypted %s -> %s\n", inlineReq.InputPath, result.OutputPath)
+			fmt.Fprintf(opts.stdout, "Updated keys (%d): %s\n", len(result.Updated), strings.Join(result.Updated, ", "))
+			return nil
+		}
+		if detectErr == nil && !hasAge && !hasPassword {
+			return fmt.Errorf("%w (not a DPX envelope and no inline ENC tokens found)", err)
+		}
 		return err
 	}
 	req := app.DecryptRequest{InputPath: filePath, OutputPath: parsed.outPath, IdentityPath: parsed.identityPath}
@@ -607,6 +636,9 @@ func runInspect(svc app.Service, args []string, opts runOptions) error {
 	fmt.Fprintf(opts.stdout, "Mode: %s\n", meta.Mode)
 	fmt.Fprintf(opts.stdout, "Original Name: %s\n", meta.OriginalName)
 	fmt.Fprintf(opts.stdout, "Created At: %s\n", meta.CreatedAt.Format("2006-01-02 15:04:05Z07:00"))
+	if meta.EncryptionAlgorithm != "" {
+		fmt.Fprintf(opts.stdout, "Encryption: %s\n", meta.EncryptionAlgorithm)
+	}
 	if meta.KDF != nil {
 		fmt.Fprintf(opts.stdout, "KDF: %s\n", meta.KDF.Algorithm)
 	}
@@ -620,6 +652,7 @@ type envEncryptArgs struct {
 	keysText       string
 	recipientsText string
 	passwordText   string
+	kdfProfile     string
 }
 
 type envDecryptArgs struct {
@@ -639,6 +672,7 @@ type envSetArgs struct {
 	encrypt        bool
 	passwordText   string
 	recipientsText string
+	kdfProfile     string
 }
 
 type envUpdateKeysArgs struct {
@@ -724,6 +758,7 @@ func runEnvEncrypt(svc app.Service, cfg config.Config, args []string, opts runOp
 		OutputPath:   parsed.outPath,
 		Mode:         mode,
 		SelectedKeys: keys,
+		KDFProfile:   parsed.kdfProfile,
 	}
 	switch mode {
 	case envelope.ModeAge:
@@ -867,6 +902,7 @@ func runEnvSet(svc app.Service, cfg config.Config, args []string, opts runOption
 		Value:      value,
 		Encrypt:    encrypt,
 		Mode:       mode,
+		KDFProfile: parsed.kdfProfile,
 	}
 	if encrypt {
 		switch mode {
@@ -1071,6 +1107,12 @@ func parseEnvSetArgs(args []string) (envSetArgs, error) {
 				return parsed, fmt.Errorf("missing value for --password")
 			}
 			parsed.passwordText = args[i]
+		case "--kdf-profile":
+			i++
+			if i >= len(args) {
+				return parsed, fmt.Errorf("missing value for --kdf-profile")
+			}
+			parsed.kdfProfile = args[i]
 		case "--recipient":
 			i++
 			if i >= len(args) {
@@ -2142,6 +2184,7 @@ type encryptArgs struct {
 	passwordText   string
 	recipientsText string
 	useAge         bool
+	kdfProfile     string
 }
 
 func parseEnvEncryptArgs(args []string) (envEncryptArgs, error) {
@@ -2179,6 +2222,12 @@ func parseEnvEncryptArgs(args []string) (envEncryptArgs, error) {
 				return parsed, fmt.Errorf("missing value for --password")
 			}
 			parsed.passwordText = args[i]
+		case "--kdf-profile":
+			i++
+			if i >= len(args) {
+				return parsed, fmt.Errorf("missing value for --kdf-profile")
+			}
+			parsed.kdfProfile = args[i]
 		default:
 			if strings.HasPrefix(arg, "--") {
 				return parsed, fmt.Errorf("unknown flag %q", arg)
@@ -2247,6 +2296,12 @@ func parseEncryptArgs(args []string) (encryptArgs, error) {
 				return parsed, fmt.Errorf("missing value for --password")
 			}
 			parsed.passwordText = args[i]
+		case "--kdf-profile":
+			i++
+			if i >= len(args) {
+				return parsed, fmt.Errorf("missing value for --kdf-profile")
+			}
+			parsed.kdfProfile = args[i]
 		case "--recipient":
 			i++
 			if i >= len(args) {
@@ -2356,15 +2411,17 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "Flags:")
 	fmt.Fprintln(w, "  --version, -v")
 	fmt.Fprintln(w, "  uninstall: --yes --remove-key --remove-encrypted")
+	fmt.Fprintln(w, "  encrypt: [file] [--password] [--age] [--recipient] [--kdf-profile] [--out]")
 	fmt.Fprintln(w, "  run: [--file|-f] [--password] [--identity] -- <command>")
-	fmt.Fprintln(w, "  env encrypt: --mode --keys --recipient --password --out")
+	fmt.Fprintln(w, "  env encrypt: --mode --keys --recipient --password --kdf-profile --out")
 	fmt.Fprintln(w, "  env decrypt: --password --identity --out")
 	fmt.Fprintln(w, "  env list: [file] [--password] [--identity]")
 	fmt.Fprintln(w, "  env get: [file] --key [--password] [--identity]")
-	fmt.Fprintln(w, "  env set: [file] --key --value [--encrypt --mode --recipient --password --out]")
+	fmt.Fprintln(w, "  env set: [file] --key --value [--encrypt --mode --recipient --password --kdf-profile --out]")
 	fmt.Fprintln(w, "  env updatekeys: [file] --recipient [--keys] [--identity] [--out]")
 	fmt.Fprintln(w, "Notes:")
 	fmt.Fprintln(w, "  - Password prompts are interactive and require confirmation when encrypting")
+	fmt.Fprintln(w, "  - Password mode supports --kdf-profile balanced|hardened|paranoid")
 	fmt.Fprintln(w, "  - Omit file args to use guided picker/search flow")
 }
 

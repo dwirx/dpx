@@ -19,8 +19,10 @@ Additional guides:
 - Decrypt back to the original filename by default
 - Guided CLI and interactive TUI modes
 - Smart file suggestions for `.env`, `.env.*`, `*.env`, `.secret*`, `.credentials*`
-- Inline `.env` key encryption: `API_KEY=ENC[age:...]` / `ENC[pwd:v1:...]`
+- Inline `.env` key encryption with mode-blind token: `API_KEY=ENC[v2:...]`
+- Backward compatible inline decrypt for legacy tokens (`ENC[age:...]`, `ENC[pwd:v1:...]`)
 - Password confirmation on encrypt flows (CLI + TUI) to reduce typo risk
+- Password KDF profiles: `balanced`, `hardened`, `paranoid` (`--kdf-profile`)
 - Safe `uninstall` command with confirmation and cleanup flags
 - `doctor` command to check config, key, and project readiness
 - Hidden password prompt on real terminals
@@ -175,10 +177,11 @@ dpx tui
 ```
 
 The TUI can:
-- choose `Encrypt`, `Decrypt`, or `Inspect`
+- choose `Encrypt`, `Decrypt`, `Inspect`, `Env Inline Encrypt`, `Env Inline Decrypt`, `Env Set`, `Env Update Keys`, and `Policy Check`
 - suggest likely secret files
 - choose `Password` or `Age`
 - prompt for recipients or password (+ confirmation when encrypting)
+- apply `hardened` KDF profile by default for password-based encryption flows
 - confirm output path
 
 ## 🧭 Common Usage
@@ -198,7 +201,7 @@ DPX will ask:
 Pass the password explicitly:
 
 ```bash
-dpx encrypt .env --password 'secret'
+dpx encrypt .env --password 'secret' --kdf-profile hardened
 ```
 
 Write to a custom output:
@@ -406,7 +409,7 @@ Behavior:
 - `--remove-encrypted` removes `.dpx` files in current directory
 - without `--yes`, command asks for explicit confirmation (`YES`)
 
-### `dpx encrypt <file> [--password <text>] [--age] [--recipient <csv>] [--out <path>]`
+### `dpx encrypt <file> [--password <text>] [--age] [--recipient <csv>] [--kdf-profile <balanced|hardened|paranoid>] [--out <path>]`
 
 Encrypt a file into `.dpx`.
 
@@ -426,7 +429,7 @@ Rules:
 - if no output is provided, DPX restores the original filename from metadata
 - if password mode is detected and no password is provided, DPX prompts for it
 
-### `dpx env encrypt [<file>] [--mode age|password] [--keys <csv>] [--recipient <csv>] [--password <text>] [--out <path>]`
+### `dpx env encrypt [<file>] [--mode age|password] [--keys <csv>] [--recipient <csv>] [--password <text>] [--kdf-profile <balanced|hardened|paranoid>] [--out <path>]`
 
 Encrypt selected `.env` keys inline into `ENC[...]` values.
 
@@ -439,7 +442,7 @@ Rules:
 
 Decrypt inline encrypted `ENC[...]` values back into plaintext env values.
 
-### `dpx env set [<file>] --key <KEY> --value <VALUE> [--encrypt] [--mode age|password] [--recipient <csv>] [--password <text>] [--out <path>]`
+### `dpx env set [<file>] --key <KEY> --value <VALUE> [--encrypt] [--mode age|password] [--recipient <csv>] [--password <text>] [--kdf-profile <balanced|hardened|paranoid>] [--out <path>]`
 
 Set or replace one env key.
 
@@ -450,7 +453,7 @@ Rules:
 
 ### `dpx env updatekeys [<file>] --recipient <csv> [--keys <csv>] [--identity <path>] [--out <path>]`
 
-Re-encrypt existing inline `ENC[age:...]` keys for new recipients.
+Re-encrypt existing inline age-backed keys (`ENC[v2:...]`) for new recipients.
 
 Rules:
 - requires the old private key (`--identity`) to decrypt current tokens
@@ -536,11 +539,20 @@ Default encrypted output:
 .env.dpx
 ```
 
+Password-mode headers now include:
+
+```text
+Encryption-Algorithm: xchacha20poly1305
+Encryption-Nonce: <base64>
+```
+
 ## Security Notes
 
 - Password mode uses `Argon2id`
 - Password encryption uses `XChaCha20-Poly1305`
 - Key mode uses `filippo.io/age`
+- Password-mode metadata is bound to ciphertext integrity (AAD), so header tampering is rejected
+- Use stronger KDF profiles (`hardened` / `paranoid`) for higher brute-force cost
 - Outer `.dpx` metadata is checked against protected inner metadata
 - Tampered metadata causes decryption to fail
 - Decryption restores original bytes

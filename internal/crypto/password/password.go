@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"strings"
 
 	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/chacha20poly1305"
@@ -13,6 +14,10 @@ import (
 const (
 	NonceSize = chacha20poly1305.NonceSizeX
 	KeySize   = chacha20poly1305.KeySize
+
+	KDFProfileBalanced = "balanced"
+	KDFProfileHardened = "hardened"
+	KDFProfileParanoid = "paranoid"
 
 	maxMemoryKiB   = 256 * 1024
 	maxIterations  = 10
@@ -29,6 +34,10 @@ type Params struct {
 }
 
 func DefaultParams() Params {
+	return defaultParamsForProfile(KDFProfileBalanced)
+}
+
+func defaultParamsForProfile(profile string) Params {
 	parallelism := runtime.NumCPU()
 	if parallelism < 2 {
 		parallelism = 2
@@ -36,7 +45,7 @@ func DefaultParams() Params {
 	if parallelism > 4 {
 		parallelism = 4
 	}
-	return Params{
+	params := Params{
 		Salt:        make([]byte, 16),
 		Nonce:       make([]byte, NonceSize),
 		MemoryKiB:   64 * 1024,
@@ -44,10 +53,30 @@ func DefaultParams() Params {
 		Parallelism: uint8(parallelism),
 		KeyLength:   KeySize,
 	}
+	switch normalizeProfile(profile) {
+	case KDFProfileHardened:
+		params.MemoryKiB = 128 * 1024
+		params.Iterations = 4
+	case KDFProfileParanoid:
+		params.MemoryKiB = 256 * 1024
+		params.Iterations = 4
+	}
+	return params
 }
 
 func NewParams() (Params, error) {
-	params := DefaultParams()
+	return NewParamsForProfile(KDFProfileBalanced)
+}
+
+func NewParamsForProfile(profile string) (Params, error) {
+	normalized := normalizeProfile(profile)
+	switch normalized {
+	case KDFProfileBalanced, KDFProfileHardened, KDFProfileParanoid:
+	default:
+		return Params{}, fmt.Errorf("unsupported kdf profile %q (supported: %s, %s, %s)", profile, KDFProfileBalanced, KDFProfileHardened, KDFProfileParanoid)
+	}
+
+	params := defaultParamsForProfile(normalized)
 	if _, err := rand.Read(params.Salt); err != nil {
 		return Params{}, fmt.Errorf("read salt: %w", err)
 	}
@@ -70,6 +99,10 @@ func Encrypt(plaintext, passphrase []byte) ([]byte, Params, error) {
 }
 
 func EncryptWithParams(plaintext, passphrase []byte, params Params) ([]byte, error) {
+	return EncryptWithParamsAndAAD(plaintext, passphrase, params, nil)
+}
+
+func EncryptWithParamsAndAAD(plaintext, passphrase []byte, params Params, aad []byte) ([]byte, error) {
 	if len(passphrase) == 0 {
 		return nil, errors.New("passphrase is required")
 	}
@@ -85,10 +118,14 @@ func EncryptWithParams(plaintext, passphrase []byte, params Params) ([]byte, err
 	if err != nil {
 		return nil, fmt.Errorf("create aead: %w", err)
 	}
-	return aead.Seal(nil, params.Nonce, plaintext, nil), nil
+	return aead.Seal(nil, params.Nonce, plaintext, aad), nil
 }
 
 func Decrypt(sealed, passphrase []byte, params Params) ([]byte, error) {
+	return DecryptWithAAD(sealed, passphrase, params, nil)
+}
+
+func DecryptWithAAD(sealed, passphrase []byte, params Params, aad []byte) ([]byte, error) {
 	if len(passphrase) == 0 {
 		return nil, errors.New("passphrase is required")
 	}
@@ -104,11 +141,23 @@ func Decrypt(sealed, passphrase []byte, params Params) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create aead: %w", err)
 	}
-	opened, err := aead.Open(nil, params.Nonce, sealed, nil)
+	opened, err := aead.Open(nil, params.Nonce, sealed, aad)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt: %w", err)
 	}
 	return opened, nil
+}
+
+func normalizeProfile(profile string) string {
+	normalized := strings.ToLower(strings.TrimSpace(profile))
+	if normalized == "" {
+		return KDFProfileBalanced
+	}
+	return normalized
+}
+
+func NormalizeProfile(profile string) string {
+	return normalizeProfile(profile)
 }
 
 func ValidateParams(params Params) error {

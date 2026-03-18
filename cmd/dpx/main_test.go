@@ -11,6 +11,7 @@ import (
 
 	"github.com/dwirx/dpx/internal/config"
 	"github.com/dwirx/dpx/internal/crypto/agex"
+	"github.com/dwirx/dpx/internal/envelope"
 )
 
 func TestDPXHelperPrintEnv(t *testing.T) {
@@ -701,6 +702,63 @@ func TestRunPasswordEncryptDecryptCommands(t *testing.T) {
 	}
 	if !bytes.Equal(restored, plaintext) {
 		t.Fatalf("restored mismatch: got %q want %q", restored, plaintext)
+	}
+}
+
+func TestRunEncryptAcceptsKDFProfileFlag(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, ".env")
+	if err := os.WriteFile(sourcePath, []byte("FOO=bar\n"), 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	if err := run([]string{"encrypt", sourcePath, "--password", "secret-123", "--kdf-profile", "hardened"}, runOptions{
+		cwd:    dir,
+		stdin:  strings.NewReader(""),
+		stdout: new(bytes.Buffer),
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("run encrypt with kdf profile: %v", err)
+	}
+
+	data, err := os.ReadFile(sourcePath + ".dpx")
+	if err != nil {
+		t.Fatalf("read encrypted output: %v", err)
+	}
+	meta, _, err := envelope.Unmarshal(data)
+	if err != nil {
+		t.Fatalf("unmarshal encrypted output: %v", err)
+	}
+	if meta.KDF == nil {
+		t.Fatal("expected kdf metadata")
+	}
+	if meta.KDF.MemoryKiB != 128*1024 {
+		t.Fatalf("expected hardened profile memory, got %d", meta.KDF.MemoryKiB)
+	}
+}
+
+func TestRunEncryptRejectsUnknownKDFProfileFlag(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, ".env")
+	if err := os.WriteFile(sourcePath, []byte("FOO=bar\n"), 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	err := run([]string{"encrypt", sourcePath, "--password", "secret-123", "--kdf-profile", "unknown"}, runOptions{
+		cwd:    dir,
+		stdin:  strings.NewReader(""),
+		stdout: new(bytes.Buffer),
+		stderr: new(bytes.Buffer),
+	})
+	if err == nil {
+		t.Fatal("expected unknown kdf profile to fail")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "kdf profile") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
@@ -1436,7 +1494,7 @@ func TestRunEnvInlinePasswordEncryptDecrypt(t *testing.T) {
 		t.Fatalf("read encrypted file: %v", err)
 	}
 	encryptedText := string(encryptedData)
-	if !strings.Contains(encryptedText, "API_KEY=ENC[pwd:v1:") || !strings.Contains(encryptedText, "JWT_SECRET=ENC[pwd:v1:") {
+	if !strings.Contains(encryptedText, "API_KEY=ENC[v2:") || !strings.Contains(encryptedText, "JWT_SECRET=ENC[v2:") {
 		t.Fatalf("expected inline password tokens, got %q", encryptedText)
 	}
 	if !strings.Contains(encryptedText, "DATABASE_URL=postgres://user:password@localhost:5432/mydb") {
@@ -1458,6 +1516,70 @@ func TestRunEnvInlinePasswordEncryptDecrypt(t *testing.T) {
 	}
 	if string(restoredData) != envInlineCLIExample {
 		t.Fatalf("restored mismatch\n--- got ---\n%s\n--- want ---\n%s", string(restoredData), envInlineCLIExample)
+	}
+}
+
+func TestRunDecryptAutoHandlesInlineEncryptedEnv(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, ".env")
+	if err := os.WriteFile(sourcePath, []byte("API_KEY=abc123\nDEBUG=true\n"), 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	if err := run([]string{"env", "encrypt", sourcePath, "--mode", "password", "--keys", "API_KEY", "--password", "secret-123"}, runOptions{
+		cwd:    dir,
+		stdin:  strings.NewReader(""),
+		stdout: new(bytes.Buffer),
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("env encrypt inline: %v", err)
+	}
+
+	restoredPath := filepath.Join(dir, ".env.inline.dec")
+	stdout := new(bytes.Buffer)
+	if err := run([]string{"decrypt", sourcePath + ".dpx", "--password", "secret-123", "--out", restoredPath}, runOptions{
+		cwd:    dir,
+		stdin:  strings.NewReader(""),
+		stdout: stdout,
+		stderr: new(bytes.Buffer),
+	}); err != nil {
+		t.Fatalf("decrypt inline via decrypt command: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "Env inline decrypted") {
+		t.Fatalf("expected inline decrypt output, got %q", stdout.String())
+	}
+
+	restoredData, err := os.ReadFile(restoredPath)
+	if err != nil {
+		t.Fatalf("read restored: %v", err)
+	}
+	if string(restoredData) != "API_KEY=abc123\nDEBUG=true\n" {
+		t.Fatalf("restored mismatch: %q", string(restoredData))
+	}
+}
+
+func TestRunDecryptOnPlaintextFileShowsClearError(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, ".env")
+	if err := os.WriteFile(sourcePath, []byte("# Test Environment Variables\nAPI_KEY=plain\n"), 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	err := run([]string{"decrypt", sourcePath}, runOptions{
+		cwd:    dir,
+		stdin:  strings.NewReader(""),
+		stdout: new(bytes.Buffer),
+		stderr: new(bytes.Buffer),
+	})
+	if err == nil {
+		t.Fatal("expected decrypt to fail for plaintext env file")
+	}
+	if !strings.Contains(err.Error(), "not a DPX envelope and no inline ENC tokens found") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
@@ -1519,7 +1641,7 @@ func TestRunEnvInlineEncryptPromptsKeySelection(t *testing.T) {
 		t.Fatalf("read encrypted output: %v", err)
 	}
 	text := string(data)
-	if !strings.Contains(text, "API_KEY=ENC[pwd:v1:") {
+	if !strings.Contains(text, "API_KEY=ENC[v2:") {
 		t.Fatalf("expected API_KEY encrypted, got %q", text)
 	}
 	if !strings.Contains(text, "JWT_SECRET=supersecretjwttoken") {
@@ -1626,7 +1748,7 @@ func TestRunPolicyCheckPassesForEncryptedValues(t *testing.T) {
 
 	dir := t.TempDir()
 	sourcePath := filepath.Join(dir, ".env")
-	if err := os.WriteFile(sourcePath, []byte("API_KEY=ENC[pwd:v1:abc]\nDEBUG=true\n"), 0o600); err != nil {
+	if err := os.WriteFile(sourcePath, []byte("API_KEY=ENC[v2:abc]\nDEBUG=true\n"), 0o600); err != nil {
 		t.Fatalf("write source: %v", err)
 	}
 
@@ -1706,7 +1828,7 @@ func TestRunEnvSetEncryptedAndReadBack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read updated file: %v", err)
 	}
-	if !strings.Contains(string(updated), "API_KEY=ENC[pwd:v1:") {
+	if !strings.Contains(string(updated), "API_KEY=ENC[v2:") {
 		t.Fatalf("expected encrypted API_KEY token, got %q", string(updated))
 	}
 
@@ -1767,10 +1889,10 @@ policy:
 		t.Fatalf("read encrypted file: %v", err)
 	}
 	encryptedText := string(encryptedData)
-	if !strings.Contains(encryptedText, "API_KEY=ENC[pwd:v1:") {
+	if !strings.Contains(encryptedText, "API_KEY=ENC[v2:") {
 		t.Fatalf("expected API_KEY to be encrypted by creation rule")
 	}
-	if !strings.Contains(encryptedText, "JWT_SECRET=ENC[pwd:v1:") {
+	if !strings.Contains(encryptedText, "JWT_SECRET=ENC[v2:") {
 		t.Fatalf("expected JWT_SECRET to be encrypted by creation rule")
 	}
 	if !strings.Contains(encryptedText, "DEBUG=true") {

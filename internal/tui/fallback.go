@@ -10,15 +10,18 @@ import (
 
 	"github.com/dwirx/dpx/internal/app"
 	"github.com/dwirx/dpx/internal/config"
+	"github.com/dwirx/dpx/internal/crypto/password"
 	"github.com/dwirx/dpx/internal/discovery"
 	"github.com/dwirx/dpx/internal/envelope"
+	"github.com/dwirx/dpx/internal/policy"
+	"github.com/dwirx/dpx/internal/safeio"
 )
 
 func RunFallback(svc app.Service, cfg config.Config, cwd string, stdin io.Reader, stdout io.Writer) error {
 	reader := bufio.NewReader(stdin)
 	renderHeader(stdout)
 
-	action, err := chooseString(reader, stdout, "Choose an action", []string{"Encrypt", "Decrypt", "Inspect", "Auto", "Import Key", "Doctor", "Env Inline Encrypt", "Env Inline Decrypt"})
+	action, err := chooseString(reader, stdout, "Choose an action", []string{"Encrypt", "Decrypt", "Inspect", "Auto", "Import Key", "Doctor", "Env Inline Encrypt", "Env Inline Decrypt", "Env Set", "Env Update Keys", "Policy Check"})
 	if err != nil {
 		return err
 	}
@@ -47,6 +50,7 @@ func RunFallback(svc app.Service, cfg config.Config, cwd string, stdin io.Reader
 			}
 		} else {
 			req.Mode = envelope.ModePassword
+			req.KDFProfile = password.KDFProfileHardened
 			passphrase, err := promptPasswordWithConfirmation(reader, stdout)
 			if err != nil {
 				return err
@@ -170,6 +174,7 @@ func RunFallback(svc app.Service, cfg config.Config, cwd string, stdin io.Reader
 			return nil
 		}
 		req := app.EncryptRequest{InputPath: filePath, Mode: envelope.ModePassword}
+		req.KDFProfile = password.KDFProfileHardened
 		passphrase, err := promptPasswordWithConfirmation(reader, stdout)
 		if err != nil {
 			return err
@@ -190,6 +195,12 @@ func RunFallback(svc app.Service, cfg config.Config, cwd string, stdin io.Reader
 		return runEnvInlineEncryptFallback(reader, stdout, svc, cfg, cwd)
 	case "Env Inline Decrypt":
 		return runEnvInlineDecryptFallback(reader, stdout, svc, cfg, cwd)
+	case "Env Set":
+		return runEnvSetFallback(reader, stdout, svc, cfg, cwd)
+	case "Env Update Keys":
+		return runEnvUpdateKeysFallback(reader, stdout, svc, cfg, cwd)
+	case "Policy Check":
+		return runPolicyCheckFallback(reader, stdout, svc, cwd)
 	case "Import Key":
 		source, err := chooseString(reader, stdout, "Import source", []string{"From file", "Paste key block"})
 		if err != nil {
@@ -241,8 +252,204 @@ func RunFallback(svc app.Service, cfg config.Config, cwd string, stdin io.Reader
 func renderHeader(w io.Writer) {
 	fmt.Fprintln(w, "╭──────────────────────────────────────────────────────────────╮")
 	fmt.Fprintln(w, "│ DPX TUI                                                      │")
-	fmt.Fprintln(w, "│ Encrypt/decrypt/inspect/env-inline/import/doctor workflow    │")
+	fmt.Fprintln(w, "│ Encrypt/decrypt/inspect/env/policy/import/doctor workflow    │")
 	fmt.Fprintln(w, "╰──────────────────────────────────────────────────────────────╯")
+}
+
+func runEnvSetFallback(reader *bufio.Reader, stdout io.Writer, svc app.Service, cfg config.Config, cwd string) error {
+	candidates, err := svc.Discover(cwd)
+	if err != nil {
+		return err
+	}
+	options := candidateLabels(candidates)
+	options = append(options, manualEncryptPathOption)
+	inputPath, err := chooseString(reader, stdout, "Select a .env file for env set", options)
+	if err != nil {
+		return err
+	}
+	if inputPath == manualEncryptPathOption {
+		inputPath, err = prompt(reader, stdout, "Env file path: ")
+		if err != nil {
+			return err
+		}
+		inputPath = strings.TrimSpace(inputPath)
+		if inputPath == "" {
+			return fmt.Errorf("file path is required")
+		}
+	}
+
+	key, err := prompt(reader, stdout, "Key name: ")
+	if err != nil {
+		return err
+	}
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return fmt.Errorf("key name is required")
+	}
+
+	value, err := prompt(reader, stdout, "Value: ")
+	if err != nil {
+		return err
+	}
+
+	mode, err := chooseString(reader, stdout, "Set mode", []string{"Plaintext", "Encrypt (Age)", "Encrypt (Password)"})
+	if err != nil {
+		return err
+	}
+
+	req := app.EnvInlineSetRequest{
+		InputPath: inputPath,
+		Key:       key,
+		Value:     value,
+	}
+	switch mode {
+	case "Encrypt (Age)":
+		req.Encrypt = true
+		req.Mode = envelope.ModeAge
+		req.Recipients = append([]string{}, cfg.Age.Recipients...)
+		if len(req.Recipients) == 0 {
+			text, err := prompt(reader, stdout, "Recipients (comma-separated): ")
+			if err != nil {
+				return err
+			}
+			req.Recipients = splitCSV(text)
+		}
+	case "Encrypt (Password)":
+		req.Encrypt = true
+		req.Mode = envelope.ModePassword
+		req.KDFProfile = password.KDFProfileHardened
+		passphrase, err := promptPasswordWithConfirmation(reader, stdout)
+		if err != nil {
+			return err
+		}
+		req.Passphrase = passphrase
+	default:
+		req.Encrypt = false
+	}
+
+	out, err := prompt(reader, stdout, fmt.Sprintf("Output path [%s]: ", req.InputPath))
+	if err != nil {
+		return err
+	}
+	req.OutputPath = strings.TrimSpace(out)
+	result, err := svc.SetEnvInlineValue(req)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "Env value updated in %s\n", req.InputPath)
+	fmt.Fprintf(stdout, "Output: %s\n", result.OutputPath)
+	fmt.Fprintf(stdout, "Updated keys (%d): %s\n", len(result.Updated), strings.Join(result.Updated, ", "))
+	return nil
+}
+
+func runEnvUpdateKeysFallback(reader *bufio.Reader, stdout io.Writer, svc app.Service, cfg config.Config, cwd string) error {
+	files, err := findEncryptedFiles(cwd)
+	if err != nil {
+		return err
+	}
+	options := append([]string{}, files...)
+	options = append(options, manualEncryptPathOption)
+	filePath, err := chooseString(reader, stdout, "Select a .env.dpx file to rotate recipients", options)
+	if err != nil {
+		return err
+	}
+	if filePath == manualEncryptPathOption {
+		filePath, err = prompt(reader, stdout, "Env .dpx file path: ")
+		if err != nil {
+			return err
+		}
+		filePath = strings.TrimSpace(filePath)
+		if filePath == "" {
+			return fmt.Errorf("file path is required")
+		}
+	}
+
+	recipientsText, err := prompt(reader, stdout, "Recipients (comma-separated): ")
+	if err != nil {
+		return err
+	}
+	recipients := splitCSV(recipientsText)
+	if len(recipients) == 0 {
+		return fmt.Errorf("at least one recipient is required")
+	}
+
+	keys, err := svc.ListEnvInlineAgeEncryptedKeys(filePath)
+	if err != nil {
+		return err
+	}
+	if len(keys) == 0 {
+		return fmt.Errorf("no age-encrypted keys found")
+	}
+	selectedKeys, err := chooseEnvKeysFallback(reader, stdout, keys)
+	if err != nil {
+		return err
+	}
+
+	req := app.EnvInlineUpdateRecipientsRequest{
+		InputPath:    filePath,
+		IdentityPath: cfg.KeyFile,
+		Recipients:   recipients,
+		SelectedKeys: selectedKeys,
+	}
+	out, err := prompt(reader, stdout, fmt.Sprintf("Output path [%s]: ", req.InputPath))
+	if err != nil {
+		return err
+	}
+	req.OutputPath = strings.TrimSpace(out)
+	result, err := svc.UpdateEnvInlineRecipients(req)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "Recipients updated in %s\n", req.InputPath)
+	fmt.Fprintf(stdout, "Output: %s\n", result.OutputPath)
+	fmt.Fprintf(stdout, "Updated keys (%d): %s\n", len(result.Updated), strings.Join(result.Updated, ", "))
+	return nil
+}
+
+func runPolicyCheckFallback(reader *bufio.Reader, stdout io.Writer, svc app.Service, cwd string) error {
+	candidates, err := svc.DiscoverEncryptTargets(cwd)
+	if err != nil {
+		return err
+	}
+	options := candidateLabels(candidates)
+	options = append(options, manualEncryptPathOption)
+	filePath, err := chooseString(reader, stdout, "Select a file for policy check", options)
+	if err != nil {
+		return err
+	}
+	if filePath == manualEncryptPathOption {
+		filePath, err = prompt(reader, stdout, "File path: ")
+		if err != nil {
+			return err
+		}
+		filePath = strings.TrimSpace(filePath)
+		if filePath == "" {
+			return fmt.Errorf("file path is required")
+		}
+	}
+
+	data, err := safeio.ReadFile(filePath)
+	if err != nil {
+		return err
+	}
+	report := policy.Check(filePath, data)
+	if report.SkipReason != "" {
+		fmt.Fprintf(stdout, "Policy OK (%s)\n", report.SkipReason)
+		return nil
+	}
+	if len(report.Findings) == 0 {
+		fmt.Fprintf(stdout, "Policy OK: no plaintext sensitive keys found (%s)\n", report.Format)
+		return nil
+	}
+	fmt.Fprintf(stdout, "Policy findings: %d (%s)\n", len(report.Findings), report.Format)
+	for _, finding := range report.Findings {
+		if finding.Line > 0 {
+			fmt.Fprintf(stdout, "- line %d key=%s: %s\n", finding.Line, finding.Key, finding.Reason)
+		} else {
+			fmt.Fprintf(stdout, "- key=%s: %s\n", finding.Key, finding.Reason)
+		}
+	}
+	return nil
 }
 
 func runEnvInlineEncryptFallback(reader *bufio.Reader, stdout io.Writer, svc app.Service, cfg config.Config, cwd string) error {
@@ -279,6 +486,7 @@ func runEnvInlineEncryptFallback(reader *bufio.Reader, stdout io.Writer, svc app
 		}
 	} else {
 		req.Mode = envelope.ModePassword
+		req.KDFProfile = password.KDFProfileHardened
 		passphrase, err := promptPasswordWithConfirmation(reader, stdout)
 		if err != nil {
 			return err

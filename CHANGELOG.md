@@ -7,6 +7,32 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [v0.0.9] - 2026-03-18
+
+### Added
+- Password envelope metadata now includes:
+  - `Encryption-Algorithm`
+  - `Encryption-Nonce`
+- Password KDF profiles for brute-force resistance:
+  - `balanced` (default CLI)
+  - `hardened`
+  - `paranoid`
+- New CLI flags for password flows:
+  - `dpx encrypt --kdf-profile ...`
+  - `dpx env encrypt --kdf-profile ...`
+  - `dpx env set --kdf-profile ...`
+- TUI/fallback password encryption defaults to `hardened` KDF profile.
+
+### Changed
+- Password envelope encryption now binds metadata to ciphertext integrity using authenticated AAD.
+- `dpx decrypt` now auto-detects inline `.env.dpx` (`ENC[...]`) and routes to inline decrypt flow.
+- CLI help and docs updated for KDF profiles and strengthened security defaults.
+
+### Fixed
+- Improved decrypt UX for plaintext/non-envelope files with clearer error:
+  - not a DPX envelope and no inline ENC tokens found.
+- Maintained backward compatibility for legacy password envelope format (nonce-prefixed payload).
+
 ## [v0.0.8] - 2026-03-18
 
 ### Added
