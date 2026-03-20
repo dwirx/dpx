@@ -135,6 +135,8 @@ func run(args []string, opts runOptions) error {
 		return runUpdate(args[1:], opts)
 	case "rollback":
 		return runRollback(args[1:], opts)
+	case "genpass":
+		return runGeneratePassword(args[1:], opts)
 	case "hook":
 		return runHook(args[1:], opts)
 	case "policy":
@@ -162,6 +164,8 @@ func run(args []string, opts runOptions) error {
 		return runEnv(svc, cfg, args[1:], opts)
 	case "rotate":
 		return runRotate(svc, cfg, args[1:], opts)
+	case "repassword":
+		return runRepassword(svc, args[1:], opts)
 	case "tui":
 		return runTUI(svc, cfg, opts)
 	default:
@@ -1823,6 +1827,15 @@ func runTUI(svc app.Service, cfg config.Config, opts runOptions) error {
 	if err == tui.ErrActionRotate {
 		return runRotate(svc, cfg, []string{}, opts)
 	}
+	if err == tui.ErrActionRepasswordManual {
+		return runRepassword(svc, []string{}, opts)
+	}
+	if err == tui.ErrActionRepasswordGenerate {
+		return runRepassword(svc, []string{"--generate-password"}, opts)
+	}
+	if err == tui.ErrActionGeneratePassword {
+		return runGeneratePassword([]string{}, opts)
+	}
 	if err == tui.ErrActionHookInstall {
 		return runHook([]string{"install"}, opts)
 	}
@@ -2152,32 +2165,37 @@ func loadConfig(cwd string) (config.Config, configSource, error) {
 }
 
 var commandAliases = map[string]string{
-	"init":      "init",
-	"doctor":    "doctor",
-	"uninstall": "uninstall",
-	"update":    "update",
-	"rollback":  "rollback",
-	"hook":      "hook",
-	"policy":    "policy",
-	"run":       "run",
-	"env":       "env",
-	"keygen":    "keygen",
-	"encrypt":   "encrypt",
-	"enc":       "encrypt",
-	"e":         "encrypt",
-	"decrypt":   "decrypt",
-	"dec":       "decrypt",
-	"d":         "decrypt",
-	"inspect":   "inspect",
-	"rotate":    "rotate",
-	"rekey":     "rotate",
-	"tui":       "tui",
-	"version":   "version",
-	"--version": "version",
-	"-v":        "version",
-	"help":      "help",
-	"--help":    "help",
-	"-h":        "help",
+	"init":              "init",
+	"doctor":            "doctor",
+	"uninstall":         "uninstall",
+	"update":            "update",
+	"rollback":          "rollback",
+	"genpass":           "genpass",
+	"passgen":           "genpass",
+	"generate-password": "genpass",
+	"hook":              "hook",
+	"policy":            "policy",
+	"run":               "run",
+	"env":               "env",
+	"keygen":            "keygen",
+	"encrypt":           "encrypt",
+	"enc":               "encrypt",
+	"e":                 "encrypt",
+	"decrypt":           "decrypt",
+	"dec":               "decrypt",
+	"d":                 "decrypt",
+	"inspect":           "inspect",
+	"rotate":            "rotate",
+	"rekey":             "rotate",
+	"repassword":        "repassword",
+	"passwd":            "repassword",
+	"tui":               "tui",
+	"version":           "version",
+	"--version":         "version",
+	"-v":                "version",
+	"help":              "help",
+	"--help":            "help",
+	"-h":                "help",
 }
 
 func resolveCommand(input string) (string, error) {
@@ -2216,7 +2234,7 @@ func suggestCommand(input string) string {
 	if strings.TrimSpace(input) == "" {
 		return ""
 	}
-	candidates := []string{"init", "doctor", "uninstall", "update", "rollback", "hook", "env", "keygen", "encrypt", "decrypt", "inspect", "rotate", "tui", "version", "help"}
+	candidates := []string{"init", "doctor", "uninstall", "update", "rollback", "genpass", "hook", "env", "keygen", "encrypt", "decrypt", "inspect", "rotate", "repassword", "tui", "version", "help"}
 	best := ""
 	bestDistance := 99
 	for _, candidate := range candidates {
@@ -2640,7 +2658,9 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  dpx update                # update to latest release")
 	fmt.Fprintln(w, "  dpx update --version v1.2.3")
 	fmt.Fprintln(w, "  dpx rollback              # restore previous binary backup")
+	fmt.Fprintln(w, "  dpx genpass --length 32 --count 3 --no-symbols")
 	fmt.Fprintln(w, "  dpx rotate                # regenerate key and re-encrypt everything")
+	fmt.Fprintln(w, "  dpx repassword .env.dpx --generate-password")
 	fmt.Fprintln(w, "  dpx env encrypt .env --mode age --keys API_KEY,JWT_SECRET")
 	fmt.Fprintln(w, "  dpx env decrypt .env.dpx --password <pass>")
 	fmt.Fprintln(w, "  dpx env list .env.dpx --password <pass>")
@@ -2657,6 +2677,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  inspect")
 	fmt.Fprintln(w, "  hook (install|uninstall)")
 	fmt.Fprintln(w, "  rotate (rekey)")
+	fmt.Fprintln(w, "  repassword (passwd)")
 	fmt.Fprintln(w, "  run")
 	fmt.Fprintln(w, "  policy (check)")
 	fmt.Fprintln(w, "  tui")
@@ -2664,6 +2685,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  uninstall")
 	fmt.Fprintln(w, "  update")
 	fmt.Fprintln(w, "  rollback")
+	fmt.Fprintln(w, "  genpass (passgen)")
 	fmt.Fprintln(w, "  env (encrypt|decrypt|list|get|set|updatekeys)")
 	fmt.Fprintln(w, "  version")
 	fmt.Fprintln(w, "  help")
@@ -2672,8 +2694,10 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  --version, -v")
 	fmt.Fprintln(w, "  uninstall: --yes --remove-key --remove-encrypted")
 	fmt.Fprintln(w, "  update: [--version]")
+	fmt.Fprintln(w, "  genpass: [--length] [--count] [--no-symbols]")
 	fmt.Fprintln(w, "  keygen: [--out] [--regen] [--import-file] [--import-stdin] [--no-config-update]")
 	fmt.Fprintln(w, "  encrypt: [file] [--password] [--age] [--recipient] [--kdf-profile] [--out]")
+	fmt.Fprintln(w, "  repassword: [file] [--old-password] [--new-password|--generate-password] [--password-length] [--kdf-profile] [--out]")
 	fmt.Fprintln(w, "  run: [--file|-f] [--password] [--identity] -- <command>")
 	fmt.Fprintln(w, "  env encrypt: --mode --keys --recipient --password --kdf-profile --out")
 	fmt.Fprintln(w, "  env decrypt: --password --identity --out")

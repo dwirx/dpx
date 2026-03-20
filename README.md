@@ -12,6 +12,9 @@ Additional guides:
 - [`docs/env-inline-workflow.md`](./docs/env-inline-workflow.md)
 - [`docs/creation-rules.md`](./docs/creation-rules.md)
 - [`docs/testing-report-2026-03-18.md`](./docs/testing-report-2026-03-18.md)
+- [`docs/password-workflow.md`](./docs/password-workflow.md)
+- [`docs/agent-skill-usage.md`](./docs/agent-skill-usage.md)
+- [`docs/testing-report-2026-03-20.md`](./docs/testing-report-2026-03-20.md)
 
 ## ✨ Features
 
@@ -23,6 +26,8 @@ Additional guides:
 - Backward compatible inline decrypt for legacy tokens (`ENC[age:...]`, `ENC[pwd:v1:...]`)
 - Password confirmation on encrypt flows (CLI + TUI) to reduce typo risk
 - Password KDF profiles: `balanced`, `hardened`, `paranoid` (`--kdf-profile`)
+- Password generator command: `dpx genpass` (`--length`, `--copy-password`)
+- Password rotation command: `dpx repassword` for `.dpx` + inline password tokens
 - Safe `uninstall` command with confirmation and cleanup flags
 - `doctor` command to check config, key, and project readiness
 - Hidden password prompt on real terminals
@@ -177,7 +182,7 @@ dpx tui
 ```
 
 The TUI can:
-- choose `Encrypt`, `Decrypt`, `Inspect`, `Env Inline Encrypt`, `Env Inline Decrypt`, `Env Set`, `Env Update Keys`, and `Policy Check`
+- choose `Encrypt`, `Decrypt`, `Inspect`, `Generate Password`, `Repassword (Manual)`, `Repassword (Generate)`, `Env Inline Encrypt`, `Env Inline Decrypt`, `Env Set`, `Env Update Keys`, and `Policy Check`
 - suggest likely secret files
 - choose `Password` or `Age`
 - prompt for recipients or password (+ confirmation when encrypting)

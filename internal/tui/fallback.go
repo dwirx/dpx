@@ -21,7 +21,7 @@ func RunFallback(svc app.Service, cfg config.Config, cwd string, stdin io.Reader
 	reader := bufio.NewReader(stdin)
 	renderHeader(stdout)
 
-	action, err := chooseString(reader, stdout, "Choose an action", []string{"Encrypt", "Decrypt", "Inspect", "Auto", "Import Key", "Regenerate Key", "Git Hook Install", "Git Hook Uninstall", "Doctor", "Env Inline Encrypt", "Env Inline Decrypt", "Env Set", "Env Update Keys", "Policy Check"})
+	action, err := chooseString(reader, stdout, "Choose an action", []string{"Encrypt", "Decrypt", "Inspect", "Auto", "Import Key", "Regenerate Key", "Repassword (Manual)", "Repassword (Generate)", "Generate Password", "Git Hook Install", "Git Hook Uninstall", "Doctor", "Env Inline Encrypt", "Env Inline Decrypt", "Env Set", "Env Update Keys", "Policy Check"})
 	if err != nil {
 		return err
 	}
@@ -203,6 +203,12 @@ func RunFallback(svc app.Service, cfg config.Config, cwd string, stdin io.Reader
 		return runPolicyCheckFallback(reader, stdout, svc, cwd)
 	case "Regenerate Key":
 		return ErrActionRotate
+	case "Repassword (Manual)":
+		return ErrActionRepasswordManual
+	case "Repassword (Generate)":
+		return ErrActionRepasswordGenerate
+	case "Generate Password":
+		return ErrActionGeneratePassword
 	case "Git Hook Install":
 		return ErrActionHookInstall
 	case "Git Hook Uninstall":

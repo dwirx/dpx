@@ -80,6 +80,14 @@ type EnvInlineUpdateRecipientsRequest struct {
 	SelectedKeys []string
 }
 
+type EnvInlineRepasswordRequest struct {
+	InputPath     string
+	OutputPath    string
+	OldPassphrase []byte
+	NewPassphrase []byte
+	KDFProfile    string
+}
+
 type EnvInlineResult struct {
 	OutputPath string
 	Updated    []string
@@ -249,6 +257,44 @@ func (s Service) DecryptEnvInlineFile(req EnvInlineDecryptRequest) (EnvInlineRes
 		outputPath = defaultInlineDecryptOutputPath(req.InputPath, s.cfg.DefaultSuffix)
 	}
 	if err := writeFileSecure(outputPath, decrypted, 0o600); err != nil {
+		return EnvInlineResult{}, err
+	}
+	return EnvInlineResult{OutputPath: outputPath, Updated: report.UpdatedKeys}, nil
+}
+
+func (s Service) RepasswordEnvInlineFile(req EnvInlineRepasswordRequest) (EnvInlineResult, error) {
+	if req.InputPath == "" {
+		return EnvInlineResult{}, fmt.Errorf("input path is required")
+	}
+	if len(req.OldPassphrase) == 0 {
+		return EnvInlineResult{}, fmt.Errorf("old passphrase is required")
+	}
+	if len(req.NewPassphrase) == 0 {
+		return EnvInlineResult{}, fmt.Errorf("new passphrase is required")
+	}
+
+	data, err := safeio.ReadFile(req.InputPath)
+	if err != nil {
+		return EnvInlineResult{}, err
+	}
+	if _, _, err := envelope.Unmarshal(data); err == nil {
+		return EnvInlineResult{}, fmt.Errorf("env repassword does not support full envelope files")
+	}
+
+	updatedData, report, err := envcrypt.Repassword(data, envcrypt.RepasswordRequest{
+		OldPassphrase: req.OldPassphrase,
+		NewPassphrase: req.NewPassphrase,
+		KDFProfile:    req.KDFProfile,
+	})
+	if err != nil {
+		return EnvInlineResult{}, err
+	}
+
+	outputPath := req.OutputPath
+	if outputPath == "" {
+		outputPath = req.InputPath
+	}
+	if err := writeFileSecure(outputPath, updatedData, 0o600); err != nil {
 		return EnvInlineResult{}, err
 	}
 	return EnvInlineResult{OutputPath: outputPath, Updated: report.UpdatedKeys}, nil

@@ -57,6 +57,12 @@ type UpdateRecipientsRequest struct {
 	SelectedKeys []string
 }
 
+type RepasswordRequest struct {
+	OldPassphrase []byte
+	NewPassphrase []byte
+	KDFProfile    string
+}
+
 type Result struct {
 	UpdatedKeys []string
 }
@@ -264,6 +270,48 @@ func Decrypt(content []byte, req DecryptRequest) ([]byte, Result, error) {
 	updatedKeys := mapKeysSorted(updatedSet)
 	if len(updatedKeys) == 0 {
 		return nil, Result{}, fmt.Errorf("no encrypted keys found")
+	}
+	return buildContent(lines, hadTrailingNewline), Result{UpdatedKeys: updatedKeys}, nil
+}
+
+func Repassword(content []byte, req RepasswordRequest) ([]byte, Result, error) {
+	if len(req.OldPassphrase) == 0 {
+		return nil, Result{}, fmt.Errorf("old passphrase is required")
+	}
+	if len(req.NewPassphrase) == 0 {
+		return nil, Result{}, fmt.Errorf("new passphrase is required")
+	}
+
+	lines, hadTrailingNewline := parseLines(content)
+	updatedSet := make(map[string]struct{})
+
+	for idx, rec := range lines {
+		if !rec.hasAssign {
+			continue
+		}
+		token, ok := parseToken(rec.value)
+		if !ok || token.mode != envelope.ModePassword {
+			continue
+		}
+		plain, err := decryptValue(token, DecryptRequest{Passphrase: req.OldPassphrase})
+		if err != nil {
+			return nil, Result{}, fmt.Errorf("decrypt %s: %w", rec.key, err)
+		}
+		reEncryptedToken, err := encryptValue(plain, EncryptRequest{
+			Mode:       envelope.ModePassword,
+			Passphrase: req.NewPassphrase,
+			KDFProfile: req.KDFProfile,
+		})
+		if err != nil {
+			return nil, Result{}, fmt.Errorf("encrypt %s: %w", rec.key, err)
+		}
+		lines[idx].raw = rec.left + "=" + preserveValuePadding(rec.value, reEncryptedToken)
+		updatedSet[rec.key] = struct{}{}
+	}
+
+	updatedKeys := mapKeysSorted(updatedSet)
+	if len(updatedKeys) == 0 {
+		return nil, Result{}, fmt.Errorf("no password-encrypted keys found")
 	}
 	return buildContent(lines, hadTrailingNewline), Result{UpdatedKeys: updatedKeys}, nil
 }

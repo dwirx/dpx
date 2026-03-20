@@ -7,6 +7,34 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [v0.0.16] - 2026-03-20
+
+### Added
+- New `dpx repassword` command to rotate password encryption for:
+  - password-mode `.dpx` envelopes
+  - inline password tokens (`ENC[...]`) in env-style files
+- New `dpx genpass` command (alias: `passgen`) to generate strong passwords from CLI.
+- New TUI actions:
+  - `Repassword (Manual)`
+  - `Repassword (Generate)`
+  - `Generate Password`
+- New documentation:
+  - `docs/password-workflow.md`
+  - `docs/agent-skill-usage.md`
+  - `docs/testing-report-2026-03-20.md`
+  - `skill/SKILL.md`
+
+### Changed
+- Upgraded `genpass` with better generation options:
+  - `--count` to generate multiple passwords in one command
+  - `--no-symbols` for compatibility-focused output
+  - entropy estimation summary in output
+- Removed automatic clipboard copy behavior from generated-password flows.
+- Updated README and CLI help text for the new password-generation and repassword workflows.
+
+### Fixed
+- Updated TUI doctor test input to match new menu ordering after adding password actions.
+
 ## [v0.0.15] - 2026-03-20
 
 ### Added

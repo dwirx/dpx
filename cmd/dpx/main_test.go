@@ -904,7 +904,7 @@ age:
 		t.Fatalf("write key file: %v", err)
 	}
 
-	input := strings.NewReader("9\n")
+	input := strings.NewReader("12\n")
 	stdout := new(bytes.Buffer)
 	if err := run([]string{"tui"}, runOptions{
 		cwd:    dir,
