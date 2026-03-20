@@ -7,6 +7,17 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [v0.0.15] - 2026-03-20
+
+### Added
+- `dpx rotate`: New command to seamlessly regenerate age key pairs and re-encrypt all `.dpx` files and inline secrets.
+- `dpx hook install`/`uninstall`: New command to manage a Git pre-commit hook that prevents accidental commits of plaintext secrets using `dpx policy check`.
+- TUI integration for `Regenerate Key`, `Git Hook Install`, and `Git Hook Uninstall` with elegant sub-handlers to safely execute terminal-heavy operations.
+- Expanded `README` documentation for key rotation and git pre-commit hooks.
+
+### Changed
+- Strengthened the interactive warning prompt for destructive key rotation operations.
+
 ## [v0.0.14] - 2026-03-19
 
 ### Fixed

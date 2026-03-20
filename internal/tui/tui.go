@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -21,6 +22,10 @@ import (
 	"github.com/dwirx/dpx/internal/policy"
 	"github.com/dwirx/dpx/internal/safeio"
 )
+
+var ErrActionRotate = errors.New("tui: action rotate")
+var ErrActionHookInstall = errors.New("tui: action hook install")
+var ErrActionHookUninstall = errors.New("tui: action hook uninstall")
 
 type stage int
 
@@ -178,7 +183,7 @@ func NewModel(svc app.Service, cfg config.Config, cwd string, stdin io.Reader, s
 		}
 	}
 	m := Model{svc: svc, cfg: cfg, cwd: cwd, stdin: stdin, stdout: stdout, interactive: interactive}
-	m.applyMenu(stageAction, "Choose an action", []string{"Encrypt", "Decrypt", "Inspect", "Auto", "Import Key", "Doctor", "Env Inline Encrypt", "Env Inline Decrypt", "Env Set", "Env Update Keys", "Policy Check"})
+	m.applyMenu(stageAction, "Choose an action", []string{"Encrypt", "Decrypt", "Inspect", "Auto", "Import Key", "Regenerate Key", "Git Hook Install", "Git Hook Uninstall", "Doctor", "Env Inline Encrypt", "Env Inline Decrypt", "Env Set", "Env Update Keys", "Policy Check"})
 	return m, nil
 }
 
@@ -468,6 +473,15 @@ func (m Model) submitSelection() (tea.Model, tea.Cmd) {
 			m.setMenu(stagePolicyFile, "Select a file for policy check", options)
 		case "Import Key":
 			m.setMenu(stageImportSource, "Import source", []string{"From file", "Paste private key"})
+		case "Regenerate Key":
+			m.err = ErrActionRotate
+			return m, tea.Quit
+		case "Git Hook Install":
+			m.err = ErrActionHookInstall
+			return m, tea.Quit
+		case "Git Hook Uninstall":
+			m.err = ErrActionHookUninstall
+			return m, tea.Quit
 		case "Doctor":
 			report, err := collectDoctorReportForTUI(m.svc, m.cwd, m.cfg)
 			if err != nil {

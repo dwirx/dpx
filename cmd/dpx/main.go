@@ -135,6 +135,8 @@ func run(args []string, opts runOptions) error {
 		return runUpdate(args[1:], opts)
 	case "rollback":
 		return runRollback(args[1:], opts)
+	case "hook":
+		return runHook(args[1:], opts)
 	case "policy":
 		return runPolicy(args[1:], opts)
 	}
@@ -158,6 +160,8 @@ func run(args []string, opts runOptions) error {
 		return runInspect(svc, args[1:], opts)
 	case "env":
 		return runEnv(svc, cfg, args[1:], opts)
+	case "rotate":
+		return runRotate(svc, cfg, args[1:], opts)
 	case "tui":
 		return runTUI(svc, cfg, opts)
 	default:
@@ -1810,10 +1814,22 @@ func chooseEnvKeys(opts runOptions, keys []string) ([]string, error) {
 }
 
 func runTUI(svc app.Service, cfg config.Config, opts runOptions) error {
+	var err error
 	if !shouldUseBubbleTUI(opts) {
-		return tui.RunFallback(svc, cfg, opts.cwd, opts.stdin, opts.stdout)
+		err = tui.RunFallback(svc, cfg, opts.cwd, opts.stdin, opts.stdout)
+	} else {
+		err = tui.Run(svc, cfg, opts.cwd, opts.stdin, opts.stdout)
 	}
-	return tui.Run(svc, cfg, opts.cwd, opts.stdin, opts.stdout)
+	if err == tui.ErrActionRotate {
+		return runRotate(svc, cfg, []string{}, opts)
+	}
+	if err == tui.ErrActionHookInstall {
+		return runHook([]string{"install"}, opts)
+	}
+	if err == tui.ErrActionHookUninstall {
+		return runHook([]string{"uninstall"}, opts)
+	}
+	return err
 }
 
 func shouldUseBubbleTUI(opts runOptions) bool {
@@ -2141,6 +2157,7 @@ var commandAliases = map[string]string{
 	"uninstall": "uninstall",
 	"update":    "update",
 	"rollback":  "rollback",
+	"hook":      "hook",
 	"policy":    "policy",
 	"run":       "run",
 	"env":       "env",
@@ -2152,6 +2169,8 @@ var commandAliases = map[string]string{
 	"dec":       "decrypt",
 	"d":         "decrypt",
 	"inspect":   "inspect",
+	"rotate":    "rotate",
+	"rekey":     "rotate",
 	"tui":       "tui",
 	"version":   "version",
 	"--version": "version",
@@ -2197,7 +2216,7 @@ func suggestCommand(input string) string {
 	if strings.TrimSpace(input) == "" {
 		return ""
 	}
-	candidates := []string{"init", "doctor", "uninstall", "update", "rollback", "env", "keygen", "encrypt", "decrypt", "inspect", "tui", "version", "help"}
+	candidates := []string{"init", "doctor", "uninstall", "update", "rollback", "hook", "env", "keygen", "encrypt", "decrypt", "inspect", "rotate", "tui", "version", "help"}
 	best := ""
 	bestDistance := 99
 	for _, candidate := range candidates {
@@ -2621,6 +2640,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  dpx update                # update to latest release")
 	fmt.Fprintln(w, "  dpx update --version v1.2.3")
 	fmt.Fprintln(w, "  dpx rollback              # restore previous binary backup")
+	fmt.Fprintln(w, "  dpx rotate                # regenerate key and re-encrypt everything")
 	fmt.Fprintln(w, "  dpx env encrypt .env --mode age --keys API_KEY,JWT_SECRET")
 	fmt.Fprintln(w, "  dpx env decrypt .env.dpx --password <pass>")
 	fmt.Fprintln(w, "  dpx env list .env.dpx --password <pass>")
@@ -2635,6 +2655,8 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  encrypt (enc)")
 	fmt.Fprintln(w, "  decrypt (dec)")
 	fmt.Fprintln(w, "  inspect")
+	fmt.Fprintln(w, "  hook (install|uninstall)")
+	fmt.Fprintln(w, "  rotate (rekey)")
 	fmt.Fprintln(w, "  run")
 	fmt.Fprintln(w, "  policy (check)")
 	fmt.Fprintln(w, "  tui")

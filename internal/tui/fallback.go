@@ -21,7 +21,7 @@ func RunFallback(svc app.Service, cfg config.Config, cwd string, stdin io.Reader
 	reader := bufio.NewReader(stdin)
 	renderHeader(stdout)
 
-	action, err := chooseString(reader, stdout, "Choose an action", []string{"Encrypt", "Decrypt", "Inspect", "Auto", "Import Key", "Doctor", "Env Inline Encrypt", "Env Inline Decrypt", "Env Set", "Env Update Keys", "Policy Check"})
+	action, err := chooseString(reader, stdout, "Choose an action", []string{"Encrypt", "Decrypt", "Inspect", "Auto", "Import Key", "Regenerate Key", "Git Hook Install", "Git Hook Uninstall", "Doctor", "Env Inline Encrypt", "Env Inline Decrypt", "Env Set", "Env Update Keys", "Policy Check"})
 	if err != nil {
 		return err
 	}
@@ -201,6 +201,12 @@ func RunFallback(svc app.Service, cfg config.Config, cwd string, stdin io.Reader
 		return runEnvUpdateKeysFallback(reader, stdout, svc, cfg, cwd)
 	case "Policy Check":
 		return runPolicyCheckFallback(reader, stdout, svc, cwd)
+	case "Regenerate Key":
+		return ErrActionRotate
+	case "Git Hook Install":
+		return ErrActionHookInstall
+	case "Git Hook Uninstall":
+		return ErrActionHookUninstall
 	case "Import Key":
 		source, err := chooseString(reader, stdout, "Import source", []string{"From file", "Paste key block"})
 		if err != nil {

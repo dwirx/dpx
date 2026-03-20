@@ -389,6 +389,32 @@ This command helps detect sensitive keys that still appear in plaintext.
 - number of suggested files
 - number of `.dpx` files in the current directory
 
+### Git pre-commit hook (prevent leaks)
+
+Install a local git hook that automatically blocks commits containing plaintext secrets:
+
+```bash
+dpx hook install
+```
+
+When installed, every `git commit` checks staged `.env` files using `dpx policy check`. If unencrypted sensitive keys are found, the commit is aborted instantly.
+
+To remove it:
+
+```bash
+dpx hook uninstall
+```
+
+### Key rotation (regenerate keys)
+
+Automatically generate a new age keypair and re-encrypt all `.dpx` files and inline secrets in your project:
+
+```bash
+dpx rotate
+```
+
+DPX will ask for stark confirmation before decrypting and re-encrypting your secrets. Your old private key will be safely backed up to `.bak` and `.dpx.yaml` will be auto-updated.
+
 ### Uninstall and cleanup
 
 Preview in help:
@@ -554,6 +580,10 @@ Rules:
 
 Show safe metadata only.
 
+### `dpx rotate [--yes]`
+
+Automatically regenerate the age keypair, decrypt all current `.dpx` files and inline secrets, re-encrypt them with the new key, and update configurations. Using `--yes` bypasses the interactive destructive warning prompt.
+
 ### `dpx doctor`
 
 Show project and local environment readiness.
@@ -561,6 +591,10 @@ Show project and local environment readiness.
 ### `dpx tui`
 
 Launch the interactive interface.
+
+### `dpx hook [install|uninstall]`
+
+Manages a local git `pre-commit` hook. The hook runs `dpx policy check` prior to any commit, rejecting the commit if sensitive plaintext keys are detected in common `.env` files.
 
 ### `dpx version`
 ### `dpx --version`
